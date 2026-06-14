@@ -136,8 +136,7 @@ class TerminalWebsocketHandler:
         command_id = 0
         while (
             command_id < len(session.command_results)
-            and session.command_index_to_update_id[command_id]
-            <= self.initial_update_id
+            and session.command_index_to_update_id[command_id] <= self.initial_update_id
         ):
             command_id += 1
         try:

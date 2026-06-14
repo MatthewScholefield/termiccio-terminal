@@ -78,6 +78,7 @@ def create_terminal_router(
     manager = pty_manager or PTYManager()
 
     if resolve_cwd is None:
+
         def resolve_cwd(request: BaseModel) -> Path | str | None:  # noqa: E306
             cwd = getattr(request, 'cwd', None)
             return Path(cwd) if cwd else None

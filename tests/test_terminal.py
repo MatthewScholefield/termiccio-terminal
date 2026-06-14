@@ -18,11 +18,7 @@ from termiccio_terminal import (
     TerminalWebsocketHandler,
     create_terminal_router,
 )
-from termiccio_terminal.schemas import (
-    CreateTerminalRequest,
-    CreateTerminalResponse,
-    CwdResponse,
-)
+from termiccio_terminal.schemas import CwdResponse
 
 
 # ---------------------------------------------------------------------------
@@ -218,9 +214,7 @@ def test_websocket_echo(app_with_router):
         resp = client.post('/terminals', json={})
         session_id = resp.json()['session_id']
 
-        with client.websocket_connect(
-            f'/terminals/{session_id}/ws?update_id=0'
-        ) as ws:
+        with client.websocket_connect(f'/terminals/{session_id}/ws?update_id=0') as ws:
             ws.send_text(json.dumps({'type': 'stdin', 'data': 'echo ws_test_123\n'}))
 
             # Collect messages until we see our echo
@@ -239,9 +233,7 @@ def test_websocket_get_size(app_with_router):
         resp = client.post('/terminals', json={})
         session_id = resp.json()['session_id']
 
-        with client.websocket_connect(
-            f'/terminals/{session_id}/ws?update_id=0'
-        ) as ws:
+        with client.websocket_connect(f'/terminals/{session_id}/ws?update_id=0') as ws:
             ws.send_text(json.dumps({'type': 'get_size'}))
             found = False
             for _ in range(20):
@@ -260,9 +252,7 @@ def test_websocket_command_finish(app_with_router):
         resp = client.post('/terminals', json={})
         session_id = resp.json()['session_id']
 
-        with client.websocket_connect(
-            f'/terminals/{session_id}/ws?update_id=0'
-        ) as ws:
+        with client.websocket_connect(f'/terminals/{session_id}/ws?update_id=0') as ws:
             ws.send_text(json.dumps({'type': 'stdin', 'data': 'true\n'}))
             found = False
             for _ in range(30):
@@ -296,9 +286,7 @@ def test_websocket_buffer_replay(app_with_router):
         time.sleep(0.5)
 
         # Connect with update_id=0 -- should receive all buffered output
-        with client.websocket_connect(
-            f'/terminals/{session_id}/ws?update_id=0'
-        ) as ws:
+        with client.websocket_connect(f'/terminals/{session_id}/ws?update_id=0') as ws:
             found_output = False
             for _ in range(10):
                 msg = ws.receive_json()
@@ -344,7 +332,9 @@ def test_building_blocks_manual_manager():
         sid = resp.json()['session_id']
 
         with client.websocket_connect(f'/my-terminal/{sid}/ws') as ws:
-            ws.send_text(json.dumps({'type': 'stdin', 'data': 'echo building_blocks\n'}))
+            ws.send_text(
+                json.dumps({'type': 'stdin', 'data': 'echo building_blocks\n'})
+            )
             found = False
             for _ in range(20):
                 msg = ws.receive_json()

@@ -26,6 +26,7 @@ class PTYManager:
         env: dict[str, str] | None = None,
     ) -> str:
         """Spawn a new session and return its id."""
+
         def on_session_complete():
             del self.sessions[session.id]
 
