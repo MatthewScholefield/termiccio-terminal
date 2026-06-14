@@ -157,6 +157,22 @@ Returns `(router, pty_manager)`.
 | `TerminalSession` | Wraps a PTY process, manages output buffer and asyncio events |
 | `TerminalWebsocketHandler` | Multiplexed WebSocket handler with buffer replay |
 
+## Concurrency: single worker only
+
+Sessions live entirely in process memory -- `PTYManager` holds a plain dict of
+`TerminalSession` objects, and each session owns a forked PTY file descriptor.
+There is no external store (Redis, shared memory, etc.) that would allow
+sessions to cross process boundaries.
+
+**You must run uvicorn with a single worker** (`--workers 1`). With multiple
+workers, a `POST /terminals` hitting worker A and a WebSocket connection
+landing on worker B will fail with "session not found."
+
+This is the standard tradeoff for in-process WebSocket state. If you need to
+scale horizontally, run multiple single-worker instances behind a load
+balancer with **sticky sessions** (route all requests for a given
+`session_id` to the same process).
+
 ## Development
 
 ```sh
