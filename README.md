@@ -1,25 +1,27 @@
 # termiccio-terminal
 
-> Reusable async PTY terminal session management with WebSocket streaming for FastAPI.
+> Host fully interactive terminal sessions in your FastAPI app and stream them to an [xterm.js](https://xtermjs.org/) frontend over WebSockets.
 
-`termiccio-terminal` extracts the non-trivial terminal plumbing -- session
-lifecycle, output buffering/replay, command-finish tracking, and a
-multiplexed WebSocket handler -- into a standalone library that any FastAPI
-application can drop in.
+`termiccio-terminal` gives you the backend building blocks for a web-based terminal: spawn PTY shells, relay input/output in real time, track command exit codes, and replay buffered output on reconnect. Drop in the included FastAPI router or wire up the components yourself.
 
-The complex async logic (buffer replay, event races, task cancellation) lives
-in **one place**. Applications only decide *how* sessions are created and what
-metadata they carry.
+## Features
 
----
+- **Live PTY sessions** -- spawn interactive shells (`bash`, `zsh`, `sh`, or a custom binary like `claude`)
+- **WebSocket streaming** -- real-time bidirectional I/O designed for xterm.js
+- **Buffer replay** -- clients reconnect with `?update_id=N` and instantly receive everything they missed
+- **Command tracking** -- every command's exit code is captured and streamed as a `command_finish` event
+- **Customizable** -- control the working directory, shell, environment variables, and request shape per session
+- **Plug-and-play router** or use the session manager / WebSocket handler directly
 
-## Quick start
+## Install
 
 ```sh
 uv add termiccio-terminal
 ```
 
-### Zero-config router
+## Quick start
+
+The easiest way is the factory, which returns a ready-made FastAPI router:
 
 ```python
 from fastapi import FastAPI
@@ -30,7 +32,7 @@ terminal_router, pty_manager = create_terminal_router(prefix="/api")
 app.include_router(terminal_router)
 ```
 
-This gives you three endpoints:
+That gives you:
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -38,10 +40,9 @@ This gives you three endpoints:
 | `GET` | `/api/terminals/{session_id}/cwd` | Get the live working directory |
 | `WS` | `/api/terminals/{session_id}/ws?update_id=N` | Stream terminal I/O |
 
-### Custom CWD resolution
+## Customizing session creation
 
-Most apps need to control *where* a terminal is spawned. Pass a
-`resolve_cwd` callback and (optionally) a custom request model:
+You'll often want to control *where* a terminal starts or what request fields are accepted. Define a Pydantic model and a `resolve_cwd` callback:
 
 ```python
 from pathlib import Path
@@ -63,16 +64,17 @@ terminal_router, pty_manager = create_terminal_router(
 )
 ```
 
-### Building blocks (advanced)
+You can also set a default `shell` or inject `env` variables for every session created through the router.
 
-For full control over session creation -- e.g. associating sessions with
-agents, spawning a custom shell, or adding metadata -- use the classes
-directly. You still reuse the entire WebSocket streaming protocol with **zero
-duplication**:
+## Using the building blocks directly
+
+For full control over session creation -- e.g. associating sessions with agents, spawning a custom shell, or adding metadata -- use `PTYManager` and `TerminalWebsocketHandler` on your own routes:
 
 ```python
+from fastapi import FastAPI, WebSocket
 from termiccio_terminal import PTYManager, TerminalWebsocketHandler
 
+app = FastAPI()
 pty_manager = PTYManager()
 
 @app.post("/agents/{agent_id}/terminal")
@@ -93,9 +95,9 @@ async def terminal_ws(websocket: WebSocket, session_id: str, update_id: int = 0)
     ).handle()
 ```
 
----
-
 ## WebSocket protocol
+
+The WebSocket endpoint accepts and sends JSON messages discriminated by a `type` field. This maps cleanly onto xterm.js's `onData` / `write` API.
 
 ### Client → Server
 
@@ -109,19 +111,14 @@ async def terminal_ws(websocket: WebSocket, session_id: str, update_id: int = 0)
 
 | `type` | Fields | Description |
 |--------|--------|-------------|
-| `output` | `data: str`, `update_id: int` | Buffered/new terminal output |
+| `output` | `data: str`, `update_id: int` | Terminal output (write to xterm.js) |
 | `size` | `rows: int`, `cols: int` | Response to `get_size` |
 | `command_finish` | `command_index: int`, `return_code: int` | A command completed |
 | `error` | `error_type: str`, `message: str` | Error (e.g. session not found) |
 
-### Buffer replay via `update_id`
+### Reconnecting with `update_id`
 
-When connecting, pass `?update_id=N` to receive all output since update ID
-*N*. This enables seamless reconnection: a client that disconnected at
-`update_id=42` reconnects with `?update_id=42` and immediately receives the
-buffered output it missed, then continues streaming live.
-
----
+Every `output` message includes an `update_id` that increments with each chunk. If the WebSocket drops, reconnect with `?update_id=N` (using the last ID you received) and the server replays all buffered output since that point before continuing the live stream. No lost output, no gaps.
 
 ## API reference
 
@@ -159,8 +156,6 @@ Returns `(router, pty_manager)`.
 | `PTYManager` | Registry of live sessions; create/get/write/resize/shutdown |
 | `TerminalSession` | Wraps a PTY process, manages output buffer and asyncio events |
 | `TerminalWebsocketHandler` | Multiplexed WebSocket handler with buffer replay |
-
----
 
 ## Development
 
