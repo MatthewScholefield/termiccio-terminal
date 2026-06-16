@@ -71,10 +71,26 @@ class TerminalWebsocketHandler:
             for task in tasks:
                 if not task.done():
                     task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await task
+            await self._drain_tasks(tasks)
             with suppress(WebSocketDisconnect, RuntimeError):
                 await self.websocket.close()
+
+    async def _drain_tasks(self, tasks: list[asyncio.Task]):
+        first_unexpected_error: BaseException | None = None
+        first_unexpected_traceback = None
+
+        for task in tasks:
+            try:
+                await task
+            except (asyncio.CancelledError, WebSocketDisconnect):
+                pass
+            except Exception as exc:
+                if first_unexpected_error is None:
+                    first_unexpected_error = exc
+                    first_unexpected_traceback = exc.__traceback__
+
+        if first_unexpected_error is not None:
+            raise first_unexpected_error.with_traceback(first_unexpected_traceback)
 
     # ------------------------------------------------------------------
     # Message helpers

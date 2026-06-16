@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocketDisconnect
 from fastapi.testclient import TestClient
 
 from termiccio_terminal import (
@@ -525,6 +525,101 @@ def test_websocket_session_not_found(app_with_router):
             msg = ws.receive_json()
             assert msg['type'] == 'error'
             assert msg['error_type'] == 'session_not_found'
+
+
+@pytest.mark.asyncio
+async def test_websocket_handler_drains_expected_disconnect_task_exceptions():
+    class FakeWebSocket:
+        closed = False
+
+        async def accept(self):
+            pass
+
+        async def close(self):
+            self.closed = True
+
+    class FakeManager:
+        def __init__(self, session):
+            self.session = session
+
+        def is_session(self, session_id):
+            return True
+
+        def get_session(self, session_id):
+            return self.session
+
+    class FakeHandler(TerminalWebsocketHandler):
+        async def publish_output_task(self, session):
+            raise WebSocketDisconnect(code=1006)
+
+        async def publish_command_finish_task(self, session):
+            await asyncio.Event().wait()
+
+        async def forward_terminal_input_task(self, session):
+            return None
+
+        async def wait_for_session_complete(self, session):
+            await asyncio.Event().wait()
+
+    session = TerminalSession(pty_process=DummyPtyProcess())
+    websocket = FakeWebSocket()
+    handler = FakeHandler(
+        websocket,
+        session.id,
+        0,
+        pty_manager=FakeManager(session),
+    )
+
+    await handler.handle()
+
+    assert websocket.closed
+    assert session.active_connections == 0
+
+
+@pytest.mark.asyncio
+async def test_websocket_handler_reraises_unexpected_task_exceptions():
+    class FakeWebSocket:
+        async def accept(self):
+            pass
+
+        async def close(self):
+            pass
+
+    class FakeManager:
+        def __init__(self, session):
+            self.session = session
+
+        def is_session(self, session_id):
+            return True
+
+        def get_session(self, session_id):
+            return self.session
+
+    class FakeHandler(TerminalWebsocketHandler):
+        async def publish_output_task(self, session):
+            raise RuntimeError('boom')
+
+        async def publish_command_finish_task(self, session):
+            await asyncio.Event().wait()
+
+        async def forward_terminal_input_task(self, session):
+            return None
+
+        async def wait_for_session_complete(self, session):
+            await asyncio.Event().wait()
+
+    session = TerminalSession(pty_process=DummyPtyProcess())
+    handler = FakeHandler(
+        FakeWebSocket(),
+        session.id,
+        0,
+        pty_manager=FakeManager(session),
+    )
+
+    with pytest.raises(RuntimeError, match='boom'):
+        await handler.handle()
+
+    assert session.active_connections == 0
 
 
 def test_websocket_buffer_replay(app_with_router):
