@@ -40,6 +40,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["termiccio_terminal"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"termiccio_terminal/xterm_worker.mjs" = "termiccio_terminal/xterm_worker.mjs"
+
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",

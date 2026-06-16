@@ -26,6 +26,7 @@ from .schemas import (
     ServerSentTerminalMessage,
     SessionExitTerminalMessage,
     SizeTerminalMessage,
+    SnapshotTerminalMessage,
     StdinTerminalMessage,
 )
 from .session import TerminalSession
@@ -46,6 +47,7 @@ __all__ = [
     'GetSizeTerminalMessage',
     'IncomingTerminalMessage',
     'OutputTerminalMessage',
+    'SnapshotTerminalMessage',
     'SizeTerminalMessage',
     'CommandFinishTerminalMessage',
     'SessionExitTerminalMessage',

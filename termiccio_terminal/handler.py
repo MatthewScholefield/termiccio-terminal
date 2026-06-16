@@ -14,6 +14,7 @@ from .schemas import (
     ServerSentTerminalMessage,
     SessionExitTerminalMessage,
     SizeTerminalMessage,
+    SnapshotTerminalMessage,
 )
 from .session import TerminalSession
 
@@ -23,8 +24,8 @@ class TerminalWebsocketHandler:
 
     Runs four concurrent tasks per connection:
 
-    * **publish_output**  -- replays buffered output from *update_id*, then
-      streams new chunks.
+    * **publish_output**  -- sends a snapshot when needed, then streams retained
+      and live chunks.
     * **publish_command_finish** -- replays missed command results, then
       streams new ones.
     * **forward_input** -- receives ``stdin``/``resize``/``get_size`` messages
@@ -120,16 +121,29 @@ class TerminalWebsocketHandler:
         update_id = self.initial_update_id
         try:
             while True:
-                new_chunks = session.output_buffer[update_id:]
-                if new_chunks:
-                    update_id += len(new_chunks)
+                session.new_content_event.clear()
+                snapshot, new_chunks = await session.reconnect_payload(update_id)
+                if snapshot:
+                    update_id = snapshot.update_id
                     await self.send_message(
-                        OutputTerminalMessage(
-                            data=''.join(new_chunks), update_id=update_id
+                        SnapshotTerminalMessage(
+                            format=snapshot.format,
+                            data=snapshot.data,
+                            update_id=snapshot.update_id,
+                            rows=snapshot.rows,
+                            cols=snapshot.cols,
                         )
                     )
+                if new_chunks:
+                    update_id = new_chunks[-1].update_id
+                    await self.send_message(
+                        OutputTerminalMessage(
+                            data=''.join(chunk.data for chunk in new_chunks),
+                            update_id=update_id,
+                        )
+                    )
+                    continue
                 await session.new_content_event.wait()
-                session.new_content_event.clear()
         except WebSocketDisconnect:
             pass
 

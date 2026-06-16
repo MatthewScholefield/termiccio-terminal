@@ -69,6 +69,15 @@ class OutputTerminalMessage(BaseModel):
     update_id: int
 
 
+class SnapshotTerminalMessage(BaseModel):
+    type: Literal['snapshot'] = 'snapshot'
+    format: Literal['xterm-serialize-v1'] = 'xterm-serialize-v1'
+    data: str
+    update_id: int
+    rows: int
+    cols: int
+
+
 class SizeTerminalMessage(BaseModel):
     type: Literal['size'] = 'size'
     rows: int
@@ -101,6 +110,7 @@ class ErrorTerminalMessage(BaseModel):
 ServerSentTerminalMessage = Annotated[
     Union[
         OutputTerminalMessage,
+        SnapshotTerminalMessage,
         SizeTerminalMessage,
         CommandFinishTerminalMessage,
         SessionExitTerminalMessage,

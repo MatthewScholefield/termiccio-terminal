@@ -13,6 +13,7 @@ venv/
 ENV/
 env/
 .uv/
+node_modules/
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/

@@ -1,0 +1,13 @@
+{
+  "name": "termiccio-terminal-worker",
+  "private": true,
+  "type": "module",
+  "description": "Node worker dependencies for termiccio-terminal's headless xterm snapshots.",
+  "dependencies": {
+    "@xterm/addon-serialize": "^0.13.0",
+    "@xterm/headless": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

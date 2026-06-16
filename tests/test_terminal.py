@@ -18,7 +18,52 @@ from termiccio_terminal import (
     TerminalWebsocketHandler,
     create_terminal_router,
 )
+from termiccio_terminal.compactor import (
+    DEFAULT_SNAPSHOT_BYTE_THRESHOLD,
+    TerminalStateCompactor,
+)
 from termiccio_terminal.schemas import CwdResponse
+from termiccio_terminal.xterm_worker import WorkerSnapshot
+
+
+class FakeStateWorker:
+    def __init__(self):
+        self.buffers = {}
+        self.created = []
+        self.resized = []
+        self.disposed = []
+        self.snapshot_count = 0
+        self.shutdown_count = 0
+
+    async def create(self, terminal_id, *, rows, cols, scrollback):
+        self.created.append((terminal_id, rows, cols, scrollback))
+        self.buffers[terminal_id] = ''
+
+    async def write(self, terminal_id, data):
+        self.buffers[terminal_id] += data
+
+    async def resize(self, terminal_id, *, rows, cols):
+        self.resized.append((terminal_id, rows, cols))
+
+    async def snapshot(self, terminal_id):
+        self.snapshot_count += 1
+        return WorkerSnapshot(data=self.buffers[terminal_id])
+
+    async def dispose(self, terminal_id):
+        self.disposed.append(terminal_id)
+
+    async def shutdown(self):
+        self.shutdown_count += 1
+
+
+class DummyPtyProcess:
+    id = 'dummy-terminal'
+
+    def __init__(self):
+        self.terminated = False
+
+    async def terminate(self):
+        self.terminated = True
 
 
 # ---------------------------------------------------------------------------
@@ -27,15 +72,10 @@ from termiccio_terminal.schemas import CwdResponse
 
 
 @pytest.fixture
-def manager():
+async def manager():
     m = PTYManager()
     yield m
-    asyncio.get_event_loop_policy()
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(m.shutdown())
-    finally:
-        loop.close()
+    await m.shutdown()
 
 
 @pytest.fixture
@@ -103,6 +143,129 @@ async def test_create_and_write(manager):
 
     output = ''.join(session.output_buffer)
     assert 'hello_world' in output
+
+
+@pytest.mark.asyncio
+async def test_compactor_snapshots_after_50kb_and_waits_one_second(monkeypatch):
+    worker = FakeStateWorker()
+    now = 100.0
+    monkeypatch.setattr(
+        'termiccio_terminal.compactor.time.monotonic',
+        lambda: now,
+    )
+    compactor = await TerminalStateCompactor.create(
+        'snap-threshold',
+        rows=24,
+        cols=80,
+        worker=worker,
+    )
+
+    almost_threshold = 'a' * (DEFAULT_SNAPSHOT_BYTE_THRESHOLD - 1)
+    assert await compactor.write(almost_threshold, 1) is None
+    assert worker.snapshot_count == 0
+
+    first_snapshot = await compactor.write('b', 2)
+    assert first_snapshot is not None
+    assert first_snapshot.update_id == 2
+    assert worker.snapshot_count == 1
+
+    assert await compactor.write('c' * DEFAULT_SNAPSHOT_BYTE_THRESHOLD, 3) is None
+    assert worker.snapshot_count == 1
+
+    now = 101.0
+    second_snapshot = await compactor.write('d', 4)
+    assert second_snapshot is not None
+    assert second_snapshot.update_id == 4
+    assert worker.snapshot_count == 2
+
+
+@pytest.mark.asyncio
+async def test_reconnect_before_compaction_receives_retained_output_only():
+    worker = FakeStateWorker()
+    compactor = await TerminalStateCompactor.create(
+        'before-compact',
+        rows=24,
+        cols=80,
+        worker=worker,
+        byte_threshold=999,
+    )
+    session = TerminalSession(pty_process=DummyPtyProcess(), compactor=compactor)
+
+    await session.append_output('one')
+    await session.append_output('two')
+
+    snapshot, chunks = await session.reconnect_payload(1)
+    assert snapshot is None
+    assert [chunk.data for chunk in chunks] == ['two']
+
+
+@pytest.mark.asyncio
+async def test_reconnect_after_compaction_receives_snapshot_plus_new_tail():
+    worker = FakeStateWorker()
+    compactor = await TerminalStateCompactor.create(
+        'after-compact',
+        rows=24,
+        cols=80,
+        worker=worker,
+        byte_threshold=1,
+        interval_seconds=0,
+    )
+    session = TerminalSession(pty_process=DummyPtyProcess(), compactor=compactor)
+
+    await session.append_output('snapshot-base')
+    compactor.byte_threshold = 999
+    await session.append_output('tail')
+
+    snapshot, chunks = await session.reconnect_payload(0)
+    assert snapshot is not None
+    assert snapshot.data == 'snapshot-base'
+    assert snapshot.update_id == 1
+    assert [chunk.data for chunk in chunks] == ['tail']
+    assert session.output_buffer == ['tail']
+
+
+@pytest.mark.asyncio
+async def test_resize_updates_snapshot_metadata_and_mirror_dimensions():
+    worker = FakeStateWorker()
+    compactor = await TerminalStateCompactor.create(
+        'resize-snapshot',
+        rows=24,
+        cols=80,
+        worker=worker,
+        byte_threshold=1,
+        interval_seconds=0,
+    )
+    session = TerminalSession(pty_process=DummyPtyProcess(), compactor=compactor)
+    await session.append_output('x')
+
+    await session.resize(30, 100)
+
+    assert worker.resized == [('resize-snapshot', 30, 100)]
+    assert compactor.snapshot is not None
+    assert compactor.snapshot.rows == 30
+    assert compactor.snapshot.cols == 100
+
+
+@pytest.mark.asyncio
+async def test_session_shutdown_disposes_worker_terminal():
+    worker = FakeStateWorker()
+    compactor = await TerminalStateCompactor.create(
+        'dispose-me',
+        rows=24,
+        cols=80,
+        worker=worker,
+    )
+    pty_process = DummyPtyProcess()
+    session = TerminalSession(
+        pty_process=pty_process,
+        compactor=compactor,
+        state_worker=worker,
+    )
+
+    await session.shutdown()
+
+    assert pty_process.terminated is True
+    assert worker.disposed == ['dispose-me']
 
 
 @pytest.mark.asyncio

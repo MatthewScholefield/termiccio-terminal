@@ -2,13 +2,13 @@
 
 > Host fully interactive terminal sessions in your FastAPI app and stream them to an [xterm.js](https://xtermjs.org/) frontend over WebSockets.
 
-`termiccio-terminal` gives you the backend building blocks for a web-based terminal: spawn PTY shells, relay input/output in real time, track command exit codes, and replay buffered output on reconnect. Drop in the included FastAPI router or wire up the components yourself.
+`termiccio-terminal` gives you the backend building blocks for a web-based terminal: spawn PTY shells, relay input/output in real time, track command exit codes, and restore xterm.js snapshots on reconnect. Drop in the included FastAPI router or wire up the components yourself.
 
 ## Features
 
 - **Live PTY sessions** -- spawn interactive shells (`bash`, `zsh`, `sh`, or a custom binary like `claude`)
 - **WebSocket streaming** -- real-time bidirectional I/O designed for xterm.js
-- **Buffer replay** -- clients reconnect with `?update_id=N` and instantly receive everything they missed
+- **Snapshot reconnect** -- clients reconnect with `?update_id=N` and receive either retained output or the latest serialized xterm.js snapshot plus a short tail
 - **Command tracking** -- every command's exit code is captured and streamed as a `command_finish` event
 - **Customizable** -- control the working directory, shell, environment variables, and request shape per session
 - **Plug-and-play router** or use the session manager / WebSocket handler directly
@@ -18,6 +18,11 @@
 ```sh
 uv add termiccio-terminal
 ```
+
+The backend runtime must have Node 18+ available. The bundled worker uses
+`@xterm/headless` and `@xterm/addon-serialize` to mirror PTY state; when running
+from source or deploying the backend, install the included `package.json`
+dependencies with `npm install`.
 
 ## Quick start
 
@@ -111,6 +116,7 @@ The WebSocket endpoint accepts and sends JSON messages discriminated by a `type`
 
 | `type` | Fields | Description |
 |--------|--------|-------------|
+| `snapshot` | `format: "xterm-serialize-v1"`, `data: str`, `update_id: int`, `rows: int`, `cols: int` | Serialized xterm.js restore state |
 | `output` | `data: str`, `update_id: int` | Terminal output (write to xterm.js) |
 | `size` | `rows: int`, `cols: int` | Response to `get_size` |
 | `command_finish` | `command_index: int`, `return_code: int` | A command completed |
@@ -118,7 +124,13 @@ The WebSocket endpoint accepts and sends JSON messages discriminated by a `type`
 
 ### Reconnecting with `update_id`
 
-Every `output` message includes an `update_id` that increments with each chunk. If the WebSocket drops, reconnect with `?update_id=N` (using the last ID you received) and the server replays all buffered output since that point before continuing the live stream. No lost output, no gaps.
+Every `output` message includes an `update_id` that increments with each chunk.
+If the WebSocket drops, reconnect with `?update_id=N` using the last ID you
+received. When that ID is still in the retained tail, the server sends the
+missed `output` chunks. When older output has been compacted, the server first
+sends a `snapshot` message and then any newer `output` chunks. Clients should
+reset xterm.js, write the snapshot `data`, record the snapshot `update_id`, and
+then continue applying live `output` messages.
 
 ## API reference
 
@@ -154,8 +166,8 @@ Returns `(router, pty_manager)`.
 | Class | Description |
 |-------|-------------|
 | `PTYManager` | Registry of live sessions; create/get/write/resize/shutdown |
-| `TerminalSession` | Wraps a PTY process, manages output buffer and asyncio events |
-| `TerminalWebsocketHandler` | Multiplexed WebSocket handler with buffer replay |
+| `TerminalSession` | Wraps a PTY process, manages retained output, snapshots, and asyncio events |
+| `TerminalWebsocketHandler` | Multiplexed WebSocket handler with snapshot reconnect |
 
 ## Concurrency: single worker only
 

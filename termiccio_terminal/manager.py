@@ -1,10 +1,11 @@
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Callable, Dict, Tuple
 
 from loguru import logger
 
 from virtual_term import TerminalDeadError
 from .session import TerminalSession
+from .xterm_worker import HeadlessXtermWorker
 
 
 class PTYManager:
@@ -14,8 +15,9 @@ class PTYManager:
     an application.  It is safe to use as a singleton.
     """
 
-    def __init__(self):
+    def __init__(self, state_worker: HeadlessXtermWorker | None = None):
         self.sessions: Dict[str, TerminalSession] = {}
+        self.state_worker = state_worker or HeadlessXtermWorker()
 
     async def create_session(
         self,
@@ -24,11 +26,14 @@ class PTYManager:
         cwd: Path | None = None,
         shell: str | None = None,
         env: dict[str, str] | None = None,
+        on_complete: Callable[[str], None] | None = None,
     ) -> str:
         """Spawn a new session and return its id."""
 
         def on_session_complete():
-            del self.sessions[session.id]
+            self.sessions.pop(session.id, None)
+            if on_complete:
+                on_complete(session.id)
 
         session = await TerminalSession.create(
             dimensions=(rows, cols),
@@ -36,6 +41,7 @@ class PTYManager:
             shell=shell,
             env=env,
             on_complete=on_session_complete,
+            state_worker=self.state_worker,
         )
         self.sessions[session.id] = session
         return session.id
@@ -51,6 +57,8 @@ class PTYManager:
         logger.info('Shutting down PTY manager...')
         for session in list(self.sessions.values()):
             await session.shutdown()
+        self.sessions.clear()
+        await self.state_worker.shutdown()
         logger.info('PTY manager shutdown complete')
 
     async def write_input(self, session_id: str, data: str):
@@ -59,11 +67,12 @@ class PTYManager:
             await session.pty_process.write(data.encode())
         except TerminalDeadError:
             await session.shutdown()
-            del self.sessions[session_id]
+            self.sessions.pop(session_id, None)
 
     async def resize_terminal(self, session_id: str, rows: int, cols: int):
         session = self.get_session(session_id)
         await session.pty_process.setwinsize(rows, cols)
+        await session.resize(rows, cols)
 
     def get_terminal_size(self, session_id: str) -> Tuple[int, int]:
         session = self.get_session(session_id)
