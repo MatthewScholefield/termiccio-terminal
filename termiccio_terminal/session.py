@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List
 
+from loguru import logger
 from virtual_term import VirtualTerm, TerminalDeadError
 
 from .compactor import (
@@ -46,6 +47,8 @@ class TerminalSession:
     _complete: bool = False
     _owns_worker: bool = False
     _compactor_disposed: bool = False
+    _compaction_failed: bool = False
+    _shutdown_requested: bool = False
 
     @property
     def id(self) -> str:
@@ -140,22 +143,40 @@ class TerminalSession:
             self.next_update_id += 1
             chunk = TerminalOutputChunk(data=data, update_id=self.next_update_id)
             self.output_chunks.append(chunk)
-            if self.compactor:
-                snapshot = await self.compactor.write(data, chunk.update_id)
-                if snapshot:
-                    self._discard_chunks_through(snapshot.update_id)
+            if self.compactor and not self._compaction_failed:
+                try:
+                    snapshot = await self.compactor.write(data, chunk.update_id)
+                except Exception:
+                    self._compaction_failed = True
+                    logger.exception(
+                        'Terminal state compaction failed for {}; snapshot reconnect '
+                        'disabled and raw output retained',
+                        self.id,
+                    )
+                else:
+                    if snapshot:
+                        self._discard_chunks_through(snapshot.update_id)
         self.new_content_event.set()
 
     async def resize(self, rows: int, cols: int):
         """Update the headless mirror size and refresh snapshot metadata."""
         async with self._output_lock:
-            if not self.compactor:
+            if not self.compactor or self._compaction_failed:
                 return
-            snapshot = await self.compactor.resize(
-                rows=rows, cols=cols, update_id=self.next_update_id
-            )
-            if snapshot:
-                self._discard_chunks_through(snapshot.update_id)
+            try:
+                snapshot = await self.compactor.resize(
+                    rows=rows, cols=cols, update_id=self.next_update_id
+                )
+            except Exception:
+                self._compaction_failed = True
+                logger.exception(
+                    'Terminal state resize failed for {}; snapshot reconnect disabled '
+                    'and raw output retained',
+                    self.id,
+                )
+            else:
+                if snapshot:
+                    self._discard_chunks_through(snapshot.update_id)
 
     async def reconnect_payload(
         self, requested_update_id: int
@@ -181,6 +202,7 @@ class TerminalSession:
     async def shutdown(self):
         """Terminate the PTY process and cancel background monitor tasks."""
         try:
+            self._shutdown_requested = True
             with suppress(TerminalDeadError):
                 await self.pty_process.terminate()
         finally:
@@ -193,7 +215,7 @@ class TerminalSession:
                 with suppress(asyncio.CancelledError):
                     await self.monitor_command_results_task
             await self._dispose_compactor()
-            self._mark_complete()
+            self._mark_complete('shutdown requested')
 
     async def _dispose_compactor(self):
         if self._compactor_disposed:
@@ -211,11 +233,12 @@ class TerminalSession:
             chunk for chunk in self.output_chunks if chunk.update_id > update_id
         ]
 
-    def _mark_complete(self):
+    def _mark_complete(self, reason: str):
         """Mark the session complete and invoke its completion callback once."""
         if self._complete:
             return
         self._complete = True
+        logger.info('Terminal session {} completed: {}', self.id, reason)
         self.session_dead_event.set()
         if self.on_complete:
             self.on_complete()
@@ -223,16 +246,24 @@ class TerminalSession:
     async def _monitor_output_task_impl(self):
         assert self.monitor_command_results_task
         decoder = codecs.getincrementaldecoder('utf-8')()
+        completion_reason = 'pty output stream ended'
         try:
             async for output in self.pty_process.read_output_stream():
                 if not output:
+                    completion_reason = 'pty output stream returned an empty chunk'
                     break
                 decoded = decoder.decode(output)
                 if decoded:
                     await self.append_output(decoded)
         except EOFError:
-            pass
+            completion_reason = 'pty output stream reached EOF'
+            logger.info('Terminal session {} output stream reached EOF', self.id)
+        except Exception:
+            completion_reason = 'pty output monitor failed'
+            logger.exception('Terminal session {} output monitor failed', self.id)
         finally:
+            if self._shutdown_requested:
+                completion_reason = 'shutdown requested'
             decoded = decoder.decode(b'', final=True)
             if decoded:
                 await self.append_output(decoded)
@@ -242,7 +273,7 @@ class TerminalSession:
             with suppress(asyncio.CancelledError):
                 await self.monitor_command_results_task
             await self._dispose_compactor()
-            self._mark_complete()
+            self._mark_complete(completion_reason)
 
     async def _monitor_command_results_task_impl(self):
         try:
@@ -251,4 +282,6 @@ class TerminalSession:
                 self.command_index_to_update_id.append(self.update_id)
                 self.new_command_result_event.set()
         except EOFError:
-            pass
+            logger.debug(
+                'Terminal session {} command result stream reached EOF', self.id
+            )

@@ -9,6 +9,7 @@ const terminals = new Map();
 
 function createTerminal(command) {
   const terminal = new Terminal({
+    allowProposedApi: true,
     cols: command.cols,
     rows: command.rows,
     scrollback: command.scrollback,

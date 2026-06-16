@@ -23,7 +23,7 @@ from termiccio_terminal.compactor import (
     TerminalStateCompactor,
 )
 from termiccio_terminal.schemas import CwdResponse
-from termiccio_terminal.xterm_worker import WorkerSnapshot
+from termiccio_terminal.xterm_worker import HeadlessXtermWorker, WorkerSnapshot
 
 
 class FakeStateWorker:
@@ -54,6 +54,12 @@ class FakeStateWorker:
 
     async def shutdown(self):
         self.shutdown_count += 1
+
+
+class SnapshotFailingWorker(FakeStateWorker):
+    async def snapshot(self, terminal_id):
+        self.snapshot_count += 1
+        raise RuntimeError('snapshot exploded')
 
 
 class DummyPtyProcess:
@@ -180,6 +186,19 @@ async def test_compactor_snapshots_after_50kb_and_waits_one_second(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_headless_worker_can_serialize_snapshot():
+    worker = HeadlessXtermWorker()
+    try:
+        await worker.create('real-worker-snapshot', rows=24, cols=80, scrollback=1000)
+        await worker.write('real-worker-snapshot', 'hello from xterm\r\n')
+        snapshot = await worker.snapshot('real-worker-snapshot')
+    finally:
+        await worker.shutdown()
+
+    assert 'hello from xterm' in snapshot.data
+
+
+@pytest.mark.asyncio
 async def test_reconnect_before_compaction_receives_retained_output_only():
     worker = FakeStateWorker()
     compactor = await TerminalStateCompactor.create(
@@ -222,6 +241,30 @@ async def test_reconnect_after_compaction_receives_snapshot_plus_new_tail():
     assert snapshot.update_id == 1
     assert [chunk.data for chunk in chunks] == ['tail']
     assert session.output_buffer == ['tail']
+
+
+@pytest.mark.asyncio
+async def test_compactor_failure_keeps_session_live_and_retains_output():
+    worker = SnapshotFailingWorker()
+    compactor = await TerminalStateCompactor.create(
+        'failing-compact',
+        rows=24,
+        cols=80,
+        worker=worker,
+        byte_threshold=1,
+        interval_seconds=0,
+    )
+    session = TerminalSession(pty_process=DummyPtyProcess(), compactor=compactor)
+
+    await session.append_output('still-live')
+    await session.append_output('still-retained')
+
+    snapshot, chunks = await session.reconnect_payload(0)
+    assert snapshot is None
+    assert [chunk.data for chunk in chunks] == ['still-live', 'still-retained']
+    assert session.session_dead_event.is_set() is False
+    assert session.output_buffer == ['still-live', 'still-retained']
+    assert worker.snapshot_count == 1
 
 
 @pytest.mark.asyncio
