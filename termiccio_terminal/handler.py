@@ -12,6 +12,7 @@ from .schemas import (
     IncomingTerminalMessage,
     OutputTerminalMessage,
     ServerSentTerminalMessage,
+    SessionExitTerminalMessage,
     SizeTerminalMessage,
 )
 from .session import TerminalSession
@@ -164,3 +165,6 @@ class TerminalWebsocketHandler:
 
     async def wait_for_session_complete(self, session: TerminalSession):
         await session.session_dead_event.wait()
+        return_code = session.command_results[-1] if session.command_results else 0
+        with suppress(WebSocketDisconnect, RuntimeError):
+            await self.send_message(SessionExitTerminalMessage(return_code=return_code))

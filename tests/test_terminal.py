@@ -40,16 +40,26 @@ def manager():
 
 @pytest.fixture
 def app_with_router(tmp_path):
+    from contextlib import asynccontextmanager
+
     router, mgr = create_terminal_router(
         resolve_cwd=lambda req: tmp_path,
     )
-    app = FastAPI()
+
+    @asynccontextmanager
+    async def lifespan(app):
+        yield
+        await mgr.shutdown()
+
+    app = FastAPI(lifespan=lifespan)
     app.include_router(router)
     return app, mgr
 
 
 @pytest.fixture
 def app_with_custom_model(tmp_path):
+    from contextlib import asynccontextmanager
+
     from pydantic import BaseModel
 
     class MyRequest(BaseModel):
@@ -64,7 +74,13 @@ def app_with_custom_model(tmp_path):
         request_model=MyRequest,
         resolve_cwd=resolve_cwd,
     )
-    app = FastAPI()
+
+    @asynccontextmanager
+    async def lifespan(app):
+        yield
+        await mgr.shutdown()
+
+    app = FastAPI(lifespan=lifespan)
     app.include_router(router)
     return app, mgr
 
@@ -132,6 +148,19 @@ async def test_command_results(manager):
     # The last command result is from `false` (exit code 1).
     # Earlier results come from the spawn-time prompt setup command.
     assert session.command_results[-1] == 1
+
+
+@pytest.mark.asyncio
+async def test_exec_replacing_shell_completes_session(manager):
+    """Agent-style launches use `exec`, so command exit is terminal exit."""
+    session_id = await manager.create_session(24, 80, shell='/bin/sh')
+    session = manager.get_session(session_id)
+
+    await manager.write_input(session_id, 'exec true\r')
+
+    await asyncio.wait_for(session.session_dead_event.wait(), timeout=2)
+    await asyncio.wait_for(session.monitor_task, timeout=2)
+    assert not manager.is_session(session_id)
 
 
 @pytest.mark.asyncio
@@ -262,6 +291,25 @@ def test_websocket_command_finish(app_with_router):
                     assert msg['return_code'] == 0
                     break
             assert found, 'Did not receive command_finish message'
+
+
+def test_websocket_session_exit(app_with_router):
+    """An ``exec``-launched process dying emits a ``session_exit`` message."""
+    app, _ = app_with_router
+    with TestClient(app) as client:
+        resp = client.post('/terminals', json={})
+        session_id = resp.json()['session_id']
+
+        with client.websocket_connect(f'/terminals/{session_id}/ws?update_id=0') as ws:
+            ws.send_text(json.dumps({'type': 'stdin', 'data': 'exec true\r'}))
+            found = False
+            for _ in range(30):
+                msg = ws.receive_json()
+                if msg['type'] == 'session_exit':
+                    found = True
+                    assert 'return_code' in msg
+                    break
+            assert found, 'Did not receive session_exit message'
 
 
 def test_websocket_session_not_found(app_with_router):

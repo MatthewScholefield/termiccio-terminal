@@ -24,6 +24,7 @@ from .schemas import (
     OutputTerminalMessage,
     ResizeTerminalMessage,
     ServerSentTerminalMessage,
+    SessionExitTerminalMessage,
     SizeTerminalMessage,
     StdinTerminalMessage,
 )
@@ -47,6 +48,7 @@ __all__ = [
     'OutputTerminalMessage',
     'SizeTerminalMessage',
     'CommandFinishTerminalMessage',
+    'SessionExitTerminalMessage',
     'ErrorTerminalMessage',
     'ServerSentTerminalMessage',
 ]

@@ -81,6 +81,17 @@ class CommandFinishTerminalMessage(BaseModel):
     return_code: int
 
 
+class SessionExitTerminalMessage(BaseModel):
+    """Sent once when the underlying PTY process terminates permanently.
+
+    Clients should treat this as a terminal close (the session will not come
+    back), distinct from a transient WebSocket disconnect.
+    """
+
+    type: Literal['session_exit'] = 'session_exit'
+    return_code: int = 0
+
+
 class ErrorTerminalMessage(BaseModel):
     type: Literal['error'] = 'error'
     error_type: str
@@ -92,6 +103,7 @@ ServerSentTerminalMessage = Annotated[
         OutputTerminalMessage,
         SizeTerminalMessage,
         CommandFinishTerminalMessage,
+        SessionExitTerminalMessage,
         ErrorTerminalMessage,
     ],
     Field(discriminator='type'),
