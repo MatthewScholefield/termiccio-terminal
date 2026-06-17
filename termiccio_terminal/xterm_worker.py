@@ -28,10 +28,21 @@ class HeadlessXtermWorker:
 
     _DIAGNOSTIC_TAIL_LINES = 40
     _RECENT_COMMAND_COUNT = 20
+    _DEFAULT_COMMAND_TIMEOUT_SECONDS = 30.0
+    _DEFAULT_STREAM_LIMIT_BYTES = 64 * 1024 * 1024
 
-    def __init__(self, *, node_executable: str = 'node'):
+    def __init__(
+        self,
+        *,
+        node_executable: str = 'node',
+        command_timeout_seconds: float = _DEFAULT_COMMAND_TIMEOUT_SECONDS,
+        stream_limit_bytes: int = _DEFAULT_STREAM_LIMIT_BYTES,
+    ):
         self.node_executable = node_executable
+        self.command_timeout_seconds = command_timeout_seconds
+        self.stream_limit_bytes = stream_limit_bytes
         self._process: asyncio.subprocess.Process | None = None
+        self._lifecycle_lock = asyncio.Lock()
         self._stdin_lock = asyncio.Lock()
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._pending_commands: dict[int, dict[str, Any]] = {}
@@ -43,6 +54,7 @@ class HeadlessXtermWorker:
             maxlen=self._RECENT_COMMAND_COUNT
         )
         self._shutdown_requested = False
+        self._stdout_reader_error: str | None = None
 
     async def create(
         self, terminal_id: str, *, rows: int, cols: int, scrollback: int
@@ -82,15 +94,11 @@ class HeadlessXtermWorker:
 
     async def shutdown(self) -> None:
         self._shutdown_requested = True
-        process = self._process
-        self._process = None
-        if process and process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=2)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+        async with self._lifecycle_lock:
+            process = self._process
+            self._process = None
+            if process:
+                await self._terminate_process(process)
         for task in (self._reader_task, self._stderr_task):
             if task:
                 task.cancel()
@@ -100,6 +108,7 @@ class HeadlessXtermWorker:
             if not future.done():
                 future.set_exception(RuntimeError('Headless xterm worker stopped'))
         self._pending.clear()
+        self._pending_commands.clear()
 
     async def _command(self, command: dict[str, Any]) -> dict[str, Any]:
         await self._ensure_started()
@@ -126,7 +135,19 @@ class HeadlessXtermWorker:
                 if not future.done():
                     future.set_exception(exc)
 
-        response = await future
+        try:
+            response = await asyncio.wait_for(
+                future, timeout=self.command_timeout_seconds
+            )
+        except asyncio.TimeoutError as exc:
+            diagnostic = self._worker_exited_error()
+            self._pending.pop(request_id, None)
+            self._pending_commands.pop(request_id, None)
+            await self._stop_broken_worker()
+            raise TimeoutError(
+                f'Headless xterm worker command timed out after '
+                f'{self.command_timeout_seconds:g}s\n{diagnostic}'
+            ) from exc
         if response.get('ok') is not True:
             raise RuntimeError(
                 str(response.get('error') or 'Headless xterm worker command failed')
@@ -150,22 +171,30 @@ class HeadlessXtermWorker:
         return {key: value for key, value in description.items() if value is not None}
 
     async def _ensure_started(self) -> None:
-        if self._process and self._process.returncode is None:
-            return
+        async with self._lifecycle_lock:
+            process = self._process
+            reader_running = self._reader_task and not self._reader_task.done()
+            if process and process.returncode is None and reader_running:
+                return
 
-        worker_path = resources.files(__package__).joinpath('xterm_worker.mjs')
-        self._shutdown_requested = False
-        self._stderr_tail.clear()
-        self._recent_commands.clear()
-        self._process = await asyncio.create_subprocess_exec(
-            self.node_executable,
-            str(worker_path),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        self._reader_task = asyncio.create_task(self._read_stdout())
-        self._stderr_task = asyncio.create_task(self._read_stderr())
+            if process:
+                await self._terminate_process(process)
+
+            worker_path = resources.files(__package__).joinpath('xterm_worker.mjs')
+            self._shutdown_requested = False
+            self._stderr_tail.clear()
+            self._recent_commands.clear()
+            self._stdout_reader_error = None
+            self._process = await asyncio.create_subprocess_exec(
+                self.node_executable,
+                str(worker_path),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=self.stream_limit_bytes,
+            )
+            self._reader_task = asyncio.create_task(self._read_stdout())
+            self._stderr_task = asyncio.create_task(self._read_stderr())
 
     async def _read_stdout(self) -> None:
         assert self._process and self._process.stdout
@@ -183,6 +212,9 @@ class HeadlessXtermWorker:
                 self._pending_commands.pop(request_id, None)
                 if future and not future.done():
                     future.set_result(response)
+        except Exception as exc:
+            self._stdout_reader_error = repr(exc)
+            logger.exception('Headless xterm worker stdout reader failed')
         finally:
             if self._shutdown_requested:
                 error = RuntimeError('Headless xterm worker stopped')
@@ -193,6 +225,7 @@ class HeadlessXtermWorker:
                         await asyncio.wait_for(process.wait(), timeout=0.2)
                 error = self._worker_exited_error()
                 logger.error('Headless xterm worker exited unexpectedly\n{}', error)
+                await self._stop_broken_worker()
             for future in self._pending.values():
                 if not future.done():
                     future.set_exception(error)
@@ -211,6 +244,8 @@ class HeadlessXtermWorker:
         lines = ['Headless xterm worker exited']
         if process:
             lines.append(f'returncode={process.returncode!r}')
+        if self._stdout_reader_error:
+            lines.append(f'stdout_reader_error={self._stdout_reader_error}')
         if self._pending_commands:
             lines.append(
                 'pending_commands='
@@ -230,3 +265,20 @@ class HeadlessXtermWorker:
         if self._stderr_tail:
             lines.append('stderr_tail:\n' + '\n'.join(self._stderr_tail))
         return HeadlessXtermWorkerExited('\n'.join(lines))
+
+    async def _stop_broken_worker(self) -> None:
+        async with self._lifecycle_lock:
+            process = self._process
+            self._process = None
+            if process:
+                await self._terminate_process(process)
+
+    async def _terminate_process(self, process: asyncio.subprocess.Process) -> None:
+        if process.returncode is not None:
+            return
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=2)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()

@@ -207,6 +207,23 @@ async def test_headless_worker_can_serialize_snapshot():
 
 
 @pytest.mark.asyncio
+async def test_headless_worker_can_read_large_snapshot_response():
+    worker = HeadlessXtermWorker()
+    try:
+        await worker.create('large-worker-snapshot', rows=24, cols=100, scrollback=2000)
+        output = ''.join(
+            f'large snapshot line {index:04d} {"x" * 80}\r\n' for index in range(1200)
+        )
+        await worker.write('large-worker-snapshot', output)
+        snapshot = await worker.snapshot('large-worker-snapshot')
+    finally:
+        await worker.shutdown()
+
+    assert 'large snapshot line 1199' in snapshot.data
+    assert len(snapshot.data.encode()) > 64 * 1024
+
+
+@pytest.mark.asyncio
 async def test_reconnect_before_compaction_receives_retained_output_only():
     worker = FakeStateWorker()
     compactor = await TerminalStateCompactor.create(
