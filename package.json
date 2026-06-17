@@ -4,8 +4,8 @@
   "type": "module",
   "description": "Node worker dependencies for termiccio-terminal's headless xterm snapshots.",
   "dependencies": {
-    "@xterm/addon-serialize": "^0.13.0",
-    "@xterm/headless": "^5.5.0"
+    "@xterm/addon-serialize": "file:vendor/xterm-addon-serialize-0.14.0.tgz",
+    "@xterm/headless": "file:vendor/xterm-headless-6.0.0.tgz"
   },
   "engines": {
     "node": ">=18"
