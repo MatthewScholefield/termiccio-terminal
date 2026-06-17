@@ -62,6 +62,14 @@ class SnapshotFailingWorker(FakeStateWorker):
         raise RuntimeError('snapshot exploded')
 
 
+class SecondSnapshotFailingWorker(FakeStateWorker):
+    async def snapshot(self, terminal_id):
+        self.snapshot_count += 1
+        if self.snapshot_count > 1:
+            raise RuntimeError('second snapshot exploded')
+        return WorkerSnapshot(data=self.buffers[terminal_id])
+
+
 class DummyPtyProcess:
     id = 'dummy-terminal'
 
@@ -265,6 +273,55 @@ async def test_compactor_failure_keeps_session_live_and_retains_output():
     assert session.session_dead_event.is_set() is False
     assert session.output_buffer == ['still-live', 'still-retained']
     assert worker.snapshot_count == 1
+
+
+@pytest.mark.asyncio
+async def test_compactor_failure_after_snapshot_keeps_snapshot_reconnect():
+    worker = SecondSnapshotFailingWorker()
+    compactor = await TerminalStateCompactor.create(
+        'failing-after-snapshot',
+        rows=24,
+        cols=80,
+        worker=worker,
+        byte_threshold=1,
+        interval_seconds=0,
+    )
+    session = TerminalSession(pty_process=DummyPtyProcess(), compactor=compactor)
+
+    await session.append_output('snapshot-base')
+    await session.append_output('tail')
+
+    snapshot, chunks = await session.reconnect_payload(0)
+    assert snapshot is not None
+    assert snapshot.data == 'snapshot-base'
+    assert [chunk.data for chunk in chunks] == ['tail']
+    assert session.session_dead_event.is_set() is False
+    assert session.output_buffer == ['tail']
+    assert worker.snapshot_count == 2
+
+
+@pytest.mark.asyncio
+async def test_reconnect_falls_back_to_compacted_replay_if_snapshot_missing():
+    worker = FakeStateWorker()
+    compactor = await TerminalStateCompactor.create(
+        'missing-snapshot-fallback',
+        rows=24,
+        cols=80,
+        worker=worker,
+        byte_threshold=1,
+        interval_seconds=0,
+    )
+    session = TerminalSession(pty_process=DummyPtyProcess(), compactor=compactor)
+
+    await session.append_output('snapshot-base')
+    compactor.snapshot = None
+    compactor.byte_threshold = 999
+    await session.append_output('tail')
+
+    snapshot, chunks = await session.reconnect_payload(0)
+    assert snapshot is None
+    assert [chunk.data for chunk in chunks] == ['snapshot-base', 'tail']
+    assert [chunk.update_id for chunk in chunks] == [1, 2]
 
 
 @pytest.mark.asyncio

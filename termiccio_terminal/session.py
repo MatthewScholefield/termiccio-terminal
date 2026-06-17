@@ -29,6 +29,7 @@ class TerminalSession:
 
     pty_process: VirtualTerm
     output_chunks: List[TerminalOutputChunk] = field(default_factory=list)
+    replay_chunks: List[TerminalOutputChunk] = field(default_factory=list)
     base_update_id: int = 0
     next_update_id: int = 0
     command_results: List[int] = field(default_factory=list)
@@ -143,19 +144,20 @@ class TerminalSession:
             self.next_update_id += 1
             chunk = TerminalOutputChunk(data=data, update_id=self.next_update_id)
             self.output_chunks.append(chunk)
+            self.replay_chunks.append(chunk)
             if self.compactor and not self._compaction_failed:
                 try:
                     snapshot = await self.compactor.write(data, chunk.update_id)
                 except Exception:
                     self._compaction_failed = True
                     logger.exception(
-                        'Terminal state compaction failed for {}; snapshot reconnect '
-                        'disabled and raw output retained',
+                        'Terminal state compaction failed for {}; future snapshots '
+                        'disabled and replay output retained',
                         self.id,
                     )
                 else:
                     if snapshot:
-                        self._discard_chunks_through(snapshot.update_id)
+                        self._apply_snapshot_compaction(snapshot)
         self.new_content_event.set()
 
     async def resize(self, rows: int, cols: int):
@@ -170,13 +172,13 @@ class TerminalSession:
             except Exception:
                 self._compaction_failed = True
                 logger.exception(
-                    'Terminal state resize failed for {}; snapshot reconnect disabled '
-                    'and raw output retained',
+                    'Terminal state resize failed for {}; future snapshots disabled '
+                    'and replay output retained',
                     self.id,
                 )
             else:
                 if snapshot:
-                    self._discard_chunks_through(snapshot.update_id)
+                    self._apply_snapshot_compaction(snapshot)
 
     async def reconnect_payload(
         self, requested_update_id: int
@@ -197,6 +199,19 @@ class TerminalSession:
                     for chunk in self.output_chunks
                     if chunk.update_id > snapshot.update_id
                 ]
+            replay_chunks = [
+                chunk
+                for chunk in self.replay_chunks
+                if chunk.update_id > requested_update_id
+            ]
+            if replay_chunks:
+                logger.warning(
+                    'Terminal session {} replaying compacted output without a '
+                    'snapshot for requested update_id {}',
+                    self.id,
+                    requested_update_id,
+                )
+                return None, replay_chunks
             return None, list(self.output_chunks)
 
     async def shutdown(self):
@@ -231,6 +246,17 @@ class TerminalSession:
         self.base_update_id = max(self.base_update_id, update_id)
         self.output_chunks = [
             chunk for chunk in self.output_chunks if chunk.update_id > update_id
+        ]
+
+    def _apply_snapshot_compaction(self, snapshot: TerminalSnapshot):
+        self._discard_chunks_through(snapshot.update_id)
+        self.replay_chunks = [
+            TerminalOutputChunk(data=snapshot.data, update_id=snapshot.update_id),
+            *[
+                chunk
+                for chunk in self.replay_chunks
+                if chunk.update_id > snapshot.update_id
+            ],
         ]
 
     def _mark_complete(self, reason: str):

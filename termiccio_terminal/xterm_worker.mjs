@@ -7,6 +7,27 @@ const { SerializeAddon } = serializePkg;
 
 const terminals = new Map();
 
+function describeError(error) {
+  if (error instanceof Error) {
+    return error.stack || `${error.name}: ${error.message}`;
+  }
+  return String(error);
+}
+
+process.on("uncaughtException", (error) => {
+  console.error(
+    `Uncaught exception in headless xterm worker:\n${describeError(error)}`,
+  );
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error(
+    `Unhandled rejection in headless xterm worker:\n${describeError(reason)}`,
+  );
+  process.exit(1);
+});
+
 function createTerminal(command) {
   const terminal = new Terminal({
     allowProposedApi: true,
@@ -84,7 +105,7 @@ for await (const line of rl) {
     send({
       request_id: command?.request_id,
       ok: false,
-      error: error instanceof Error ? error.message : String(error),
+      error: describeError(error),
     });
   }
 }
