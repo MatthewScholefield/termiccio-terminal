@@ -650,7 +650,7 @@ requires-dist = [
     { name = "ptyprocess", specifier = ">=0.7.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.0" },
-    { name = "virtual-term", specifier = ">=2.0.2" },
+    { name = "virtual-term", editable = "../virtual-term" },
 ]
 
 [package.metadata.requires-dev]
@@ -809,14 +809,13 @@ wheels = [
 [[package]]
 name = "virtual-term"
 version = "2.0.2"
-source = { registry = "https://pypi.org/simple" }
+source = { editable = "../virtual-term" }
 dependencies = [
     { name = "asyncinotify" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9a/70/58a09b0fac9361405e29eb3bfd0e2e70d817b0c8524f9bbfd3506d1b8ce1/virtual_term-2.0.2.tar.gz", hash = "sha256:f41ef6df0d3d5fba6cfcae40db20c0b634d187556fb8a95f1a35df1b235da66d", size = 7247, upload-time = "2025-01-23T10:03:55.372Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/0d/e6/cf3b90ac1e600f81e99c0f7085d122810c1a133dd6eb4217ab18b9b9d4ac/virtual_term-2.0.2-py3-none-any.whl", hash = "sha256:e35bf87b6c11372107815ee1027caac875fba876272214bfd079728e63e04a42", size = 7029, upload-time = "2025-01-23T10:03:53.903Z" },
-]
+
+[package.metadata]
+requires-dist = [{ name = "asyncinotify", specifier = ">=4.2.0" }]
 
 [[package]]
 name = "virtualenv"

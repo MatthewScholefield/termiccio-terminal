@@ -26,7 +26,7 @@ With custom CWD resolution and request model::
 """
 
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 from fastapi import APIRouter, HTTPException, WebSocket
 from pydantic import BaseModel
@@ -36,6 +36,7 @@ from .manager import PTYManager
 from .schemas import CreateTerminalRequest, CreateTerminalResponse, CwdResponse
 
 ResolveCwd = Callable[[BaseModel], Path | str | None]
+PtyCommand = str | Sequence[str]
 
 
 def create_terminal_router(
@@ -45,6 +46,7 @@ def create_terminal_router(
     request_model: type[BaseModel] = CreateTerminalRequest,
     resolve_cwd: ResolveCwd | None = None,
     shell: str | None = None,
+    command: PtyCommand | None = None,
     env: dict[str, str] | None = None,
     mkdir: bool = True,
 ) -> tuple[APIRouter, PTYManager]:
@@ -67,6 +69,7 @@ def create_terminal_router(
             shell CWD).  When omitted, the ``cwd`` field of *request_model* is
             used if present.
         shell: Override the shell executable for every session.
+        command: Spawn this command directly instead of launching a shell.
         env: Extra environment variables injected into every session.
         mkdir: When ``True`` (default), ``mkdir -p`` the resolved CWD before
             spawning.
@@ -96,6 +99,7 @@ def create_terminal_router(
             request.cols,
             cwd=cwd_path,
             shell=shell,
+            command=command,
             env=env,
         )
         return CreateTerminalResponse(session_id=session_id)

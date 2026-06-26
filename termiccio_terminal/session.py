@@ -1,10 +1,11 @@
 import asyncio
 import codecs
 import os
+import shlex
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List
+from typing import Callable, List, Sequence
 
 from loguru import logger
 from virtual_term import VirtualTerm, TerminalDeadError
@@ -16,6 +17,8 @@ from .compactor import (
     TerminalStateCompactor,
 )
 from .xterm_worker import HeadlessXtermWorker
+
+PtyCommand = str | Sequence[str]
 
 
 @dataclass
@@ -81,6 +84,7 @@ class TerminalSession:
         cwd: Path | None = None,
         dimensions=(24, 80),
         shell: str | None = None,
+        command: PtyCommand | None = None,
         env: dict[str, str] | None = None,
         on_complete: Callable[[], None] | None = None,
         state_worker: HeadlessXtermWorker | None = None,
@@ -92,23 +96,27 @@ class TerminalSession:
             cwd: Working directory for the shell.
             dimensions: ``(rows, cols)`` terminal dimensions.
             shell: Shell executable path (defaults to ``$SHELL``).
+            command: Command to spawn directly as the PTY child. When set, no
+                shell is launched first.
             env: Extra environment variables to inject into the spawned shell.
             on_complete: Callback invoked once when the session terminates.
             state_worker: Worker used to mirror output into xterm-headless.
             scrollback: Headless xterm scrollback setting.
         """
-        saved_env = None
-        if env:
-            saved_env = dict(os.environ)
-            os.environ.update(env)
-        try:
-            pty_process = await VirtualTerm.spawn(
-                dimensions=dimensions, cwd=cwd, shell=shell
+        if shell and command:
+            raise ValueError('Cannot specify both shell and command.')
+
+        if command is not None:
+            argv = shlex.split(command) if isinstance(command, str) else list(command)
+            if not argv:
+                raise ValueError('PTY command cannot be empty.')
+            pty_process = await VirtualTerm.spawn_command(
+                argv, dimensions=dimensions, cwd=cwd, env=env
             )
-        finally:
-            if saved_env is not None:
-                os.environ.clear()
-                os.environ.update(saved_env)
+        else:
+            pty_process = await VirtualTerm.spawn(
+                dimensions=dimensions, cwd=cwd, shell=shell, env=env
+            )
         worker = state_worker or HeadlessXtermWorker()
         rows, cols = dimensions
         session = cls(

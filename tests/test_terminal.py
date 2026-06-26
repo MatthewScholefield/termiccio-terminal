@@ -160,6 +160,29 @@ async def test_create_and_write(manager):
 
 
 @pytest.mark.asyncio
+async def test_create_direct_command_uses_cwd_and_env(manager, tmp_path):
+    session_id = await manager.create_session(
+        24,
+        80,
+        cwd=tmp_path,
+        command=[
+            '/bin/sh',
+            '-lc',
+            'printf "direct:%s:%s" "$PWD" "$MY_TEST_VAR"',
+        ],
+        env={'MY_TEST_VAR': 'abc123'},
+    )
+    session = manager.get_session(session_id)
+
+    await asyncio.wait_for(session.session_dead_event.wait(), timeout=2)
+    await asyncio.wait_for(session.monitor_task, timeout=2)
+
+    output = ''.join(session.output_buffer)
+    assert f'direct:{tmp_path}:abc123' in output
+    assert not manager.is_session(session_id)
+
+
+@pytest.mark.asyncio
 async def test_compactor_snapshots_after_50kb_and_waits_one_second(monkeypatch):
     worker = FakeStateWorker()
     now = 100.0
@@ -432,7 +455,7 @@ async def test_command_results(manager):
 
 @pytest.mark.asyncio
 async def test_exec_replacing_shell_completes_session(manager):
-    """Agent-style launches use `exec`, so command exit is terminal exit."""
+    """Replacing an interactive shell with exec makes command exit terminal exit."""
     session_id = await manager.create_session(24, 80, shell='/bin/sh')
     session = manager.get_session(session_id)
 
@@ -574,7 +597,7 @@ def test_websocket_command_finish(app_with_router):
 
 
 def test_websocket_session_exit(app_with_router):
-    """An ``exec``-launched process dying emits a ``session_exit`` message."""
+    """An interactive shell process exiting emits a ``session_exit`` message."""
     app, _ = app_with_router
     with TestClient(app) as client:
         resp = client.post('/terminals', json={})

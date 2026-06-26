@@ -1,11 +1,13 @@
 from pathlib import Path
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict, Sequence, Tuple
 
 from loguru import logger
 
 from virtual_term import TerminalDeadError
 from .session import TerminalSession
 from .xterm_worker import HeadlessXtermWorker
+
+PtyCommand = str | Sequence[str]
 
 
 class PTYManager:
@@ -25,6 +27,7 @@ class PTYManager:
         cols: int,
         cwd: Path | None = None,
         shell: str | None = None,
+        command: PtyCommand | None = None,
         env: dict[str, str] | None = None,
         on_complete: Callable[[str], None] | None = None,
     ) -> str:
@@ -39,6 +42,7 @@ class PTYManager:
             dimensions=(rows, cols),
             cwd=cwd,
             shell=shell,
+            command=command,
             env=env,
             on_complete=on_session_complete,
             state_worker=self.state_worker,

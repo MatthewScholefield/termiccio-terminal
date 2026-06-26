@@ -6,7 +6,7 @@
 
 ## Features
 
-- **Live PTY sessions** -- spawn interactive shells (`bash`, `zsh`, `sh`, or a custom binary like `claude`)
+- **Live PTY sessions** -- spawn interactive shells (`bash`, `zsh`, `sh`) or direct PTY commands like `claude`
 - **WebSocket streaming** -- real-time bidirectional I/O designed for xterm.js
 - **Snapshot reconnect** -- clients reconnect with `?update_id=N` and receive either retained output or the latest serialized xterm.js snapshot plus a short tail
 - **Command tracking** -- every command's exit code is captured and streamed as a `command_finish` event
@@ -69,7 +69,7 @@ terminal_router, pty_manager = create_terminal_router(
 )
 ```
 
-You can also set a default `shell` or inject `env` variables for every session created through the router.
+You can also set a default `shell`, spawn a direct `command`, or inject `env` variables for every session created through the router.
 
 ## Using the building blocks directly
 
@@ -88,7 +88,7 @@ async def create_agent_terminal(agent_id: str):
     session_id = await pty_manager.create_session(
         rows=24, cols=80,
         cwd=agent.project_folder,
-        shell="claude",
+        command=["claude"],
     )
     agent.terminal_session_id = session_id
     return {"session_id": session_id}
@@ -144,6 +144,7 @@ create_terminal_router(
     request_model: type[BaseModel] = CreateTerminalRequest,
     resolve_cwd: Callable[[BaseModel], Path | str | None] | None = None,
     shell: str | None = None,
+    command: str | Sequence[str] | None = None,
     env: dict[str, str] | None = None,
     mkdir: bool = True,
 ) -> tuple[APIRouter, PTYManager]
@@ -156,6 +157,7 @@ create_terminal_router(
 | `request_model` | `CreateTerminalRequest` | Pydantic model for `POST /terminals` |
 | `resolve_cwd` | extracts `cwd` field | Callback mapping request → working directory |
 | `shell` | `None` (`$SHELL`) | Shell executable override |
+| `command` | `None` | Command to spawn directly as the PTY child instead of launching a shell |
 | `env` | `None` | Extra environment variables |
 | `mkdir` | `True` | Create the CWD directory if it doesn't exist |
 

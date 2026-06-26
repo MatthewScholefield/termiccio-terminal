@@ -52,6 +52,9 @@ dev = [
     "ruff>=0.6.0",
 ]
 
+[tool.uv.sources]
+virtual-term = { path = "../virtual-term", editable = true }
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 
