@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass
@@ -96,12 +97,15 @@ class HeadlessXtermWorker:
         self._shutdown_requested = True
         async with self._lifecycle_lock:
             process = self._process
-            self._process = None
             if process:
-                await self._terminate_process(process)
+                await self._shutdown_process(process)
         for task in (self._reader_task, self._stderr_task):
             if task:
-                task.cancel()
+                if not task.done():
+                    task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+        self._process = None
         self._reader_task = None
         self._stderr_task = None
         for future in self._pending.values():
@@ -185,6 +189,9 @@ class HeadlessXtermWorker:
             self._stderr_tail.clear()
             self._recent_commands.clear()
             self._stdout_reader_error = None
+            subprocess_kwargs: dict[str, Any] = {}
+            if os.name == 'posix':
+                subprocess_kwargs['start_new_session'] = True
             self._process = await asyncio.create_subprocess_exec(
                 self.node_executable,
                 str(worker_path),
@@ -192,6 +199,7 @@ class HeadlessXtermWorker:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=self.stream_limit_bytes,
+                **subprocess_kwargs,
             )
             self._reader_task = asyncio.create_task(self._read_stdout())
             self._stderr_task = asyncio.create_task(self._read_stderr())
@@ -282,3 +290,21 @@ class HeadlessXtermWorker:
         except asyncio.TimeoutError:
             process.kill()
             await process.wait()
+
+    async def _shutdown_process(self, process: asyncio.subprocess.Process) -> None:
+        if process.returncode is not None:
+            return
+        stdin = process.stdin
+        if stdin:
+            stdin.close()
+            with suppress(
+                AttributeError,
+                BrokenPipeError,
+                ConnectionResetError,
+                RuntimeError,
+            ):
+                await stdin.wait_closed()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=2)
+        except asyncio.TimeoutError:
+            await self._terminate_process(process)

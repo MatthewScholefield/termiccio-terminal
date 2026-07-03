@@ -12,6 +12,7 @@ import pytest
 from fastapi import FastAPI, WebSocketDisconnect
 from fastapi.testclient import TestClient
 
+from termiccio_terminal import xterm_worker as xterm_worker_module
 from termiccio_terminal import (
     PTYManager,
     TerminalSession,
@@ -23,7 +24,11 @@ from termiccio_terminal.compactor import (
     TerminalStateCompactor,
 )
 from termiccio_terminal.schemas import CwdResponse
-from termiccio_terminal.xterm_worker import HeadlessXtermWorker, WorkerSnapshot
+from termiccio_terminal.xterm_worker import (
+    HeadlessXtermWorker,
+    HeadlessXtermWorkerExited,
+    WorkerSnapshot,
+)
 
 
 class FakeStateWorker:
@@ -78,6 +83,70 @@ class DummyPtyProcess:
 
     async def terminate(self):
         self.terminated = True
+
+
+class FakeReadablePipe:
+    def __init__(self):
+        self._eof = asyncio.Event()
+
+    async def readline(self):
+        await self._eof.wait()
+        return b''
+
+    def feed_eof(self):
+        self._eof.set()
+
+
+class FakeWorkerStdin:
+    def __init__(self, on_close):
+        self.closed = False
+        self.wait_closed_count = 0
+        self._on_close = on_close
+
+    def close(self):
+        self.closed = True
+        self._on_close()
+
+    async def wait_closed(self):
+        self.wait_closed_count += 1
+
+
+class FakeWorkerProcess:
+    def __init__(self, *, close_exits=True, returncode=None):
+        self.returncode = returncode
+        self.stdout = FakeReadablePipe()
+        self.stderr = FakeReadablePipe()
+        self.wait_count = 0
+        self.terminate_count = 0
+        self.kill_count = 0
+        self._close_exits = close_exits
+        self._exited = asyncio.Event()
+        self.stdin = FakeWorkerStdin(self._stdin_closed)
+        if returncode is not None:
+            self._finish(returncode)
+
+    def _stdin_closed(self):
+        if self._close_exits:
+            self._finish(0)
+
+    def _finish(self, returncode):
+        self.returncode = returncode
+        self.stdout.feed_eof()
+        self.stderr.feed_eof()
+        self._exited.set()
+
+    async def wait(self):
+        self.wait_count += 1
+        await self._exited.wait()
+        return self.returncode
+
+    def terminate(self):
+        self.terminate_count += 1
+        self._finish(-15)
+
+    def kill(self):
+        self.kill_count += 1
+        self._finish(-9)
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +313,89 @@ async def test_headless_worker_can_read_large_snapshot_response():
 
     assert 'large snapshot line 1199' in snapshot.data
     assert len(snapshot.data.encode()) > 64 * 1024
+
+
+@pytest.mark.asyncio
+async def test_headless_worker_starts_process_in_new_session_on_posix(monkeypatch):
+    calls = []
+
+    async def create_subprocess_exec(*args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeWorkerProcess()
+
+    monkeypatch.setattr(
+        xterm_worker_module.asyncio,
+        'create_subprocess_exec',
+        create_subprocess_exec,
+    )
+
+    worker = HeadlessXtermWorker()
+    await worker._ensure_started()
+    await worker.shutdown()
+
+    assert calls
+    subprocess_kwargs = calls[0][1]
+    if xterm_worker_module.os.name == 'posix':
+        assert subprocess_kwargs['start_new_session'] is True
+    else:
+        assert 'start_new_session' not in subprocess_kwargs
+
+
+@pytest.mark.asyncio
+async def test_headless_worker_shutdown_closes_stdin_and_awaits_exit(monkeypatch):
+    errors = []
+    monkeypatch.setattr(
+        xterm_worker_module.logger,
+        'error',
+        lambda message, error: errors.append((message, error)),
+    )
+
+    worker = HeadlessXtermWorker()
+    process = FakeWorkerProcess()
+    worker._process = process
+    worker._reader_task = asyncio.create_task(worker._read_stdout())
+    worker._stderr_task = asyncio.create_task(worker._read_stderr())
+    await asyncio.sleep(0)
+
+    await worker.shutdown()
+
+    assert process.stdin.closed is True
+    assert process.stdin.wait_closed_count == 1
+    assert process.wait_count >= 1
+    assert process.terminate_count == 0
+    assert process.kill_count == 0
+    assert worker._process is None
+    assert errors == []
+
+
+@pytest.mark.asyncio
+async def test_headless_worker_unexpected_exit_keeps_diagnostics(monkeypatch):
+    errors = []
+    monkeypatch.setattr(
+        xterm_worker_module.logger,
+        'error',
+        lambda message, error: errors.append((message, error)),
+    )
+
+    worker = HeadlessXtermWorker()
+    process = FakeWorkerProcess(returncode=-2)
+    worker._process = process
+    future = asyncio.get_running_loop().create_future()
+    worker._pending[7] = future
+    worker._pending_commands[7] = {'type': 'snapshot', 'terminal_id': 'term-1'}
+    worker._recent_commands.append(
+        {'request_id': 7, 'type': 'snapshot', 'terminal_id': 'term-1'}
+    )
+
+    await worker._read_stdout()
+
+    assert errors
+    assert errors[0][0] == 'Headless xterm worker exited unexpectedly\n{}'
+    assert isinstance(errors[0][1], HeadlessXtermWorkerExited)
+    assert 'returncode=-2' in str(errors[0][1])
+    assert 'pending_commands=' in str(errors[0][1])
+    assert 'recent_commands=' in str(errors[0][1])
+    assert isinstance(future.exception(), HeadlessXtermWorkerExited)
 
 
 @pytest.mark.asyncio
