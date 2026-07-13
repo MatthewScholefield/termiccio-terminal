@@ -30,6 +30,7 @@ class PTYManager:
         command: PtyCommand | None = None,
         env: dict[str, str] | None = None,
         on_complete: Callable[[str], None] | None = None,
+        on_output: Callable[[str, int], None] | None = None,
     ) -> str:
         """Spawn a new session and return its id."""
 
@@ -45,6 +46,7 @@ class PTYManager:
             command=command,
             env=env,
             on_complete=on_session_complete,
+            on_output=on_output,
             state_worker=self.state_worker,
         )
         self.sessions[session.id] = session

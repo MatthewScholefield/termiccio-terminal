@@ -44,6 +44,7 @@ class TerminalSession:
     monitor_command_results_task: asyncio.Task | None = None
     active_connections: int = 0
     on_complete: Callable[[], None] | None = None
+    on_output: Callable[[str, int], None] | None = None
     cwd: Path | None = None
     compactor: TerminalStateCompactor | None = None
     state_worker: HeadlessXtermWorker | None = None
@@ -87,6 +88,7 @@ class TerminalSession:
         command: PtyCommand | None = None,
         env: dict[str, str] | None = None,
         on_complete: Callable[[], None] | None = None,
+        on_output: Callable[[str, int], None] | None = None,
         state_worker: HeadlessXtermWorker | None = None,
         scrollback: int = DEFAULT_SCROLLBACK,
     ) -> 'TerminalSession':
@@ -122,6 +124,7 @@ class TerminalSession:
         session = cls(
             pty_process=pty_process,
             on_complete=on_complete,
+            on_output=on_output,
             cwd=cwd,
             state_worker=worker,
             _owns_worker=state_worker is None,
@@ -167,6 +170,11 @@ class TerminalSession:
                     if snapshot:
                         self._apply_snapshot_compaction(snapshot)
         self.new_content_event.set()
+        if self.on_output:
+            try:
+                self.on_output(data, chunk.update_id)
+            except Exception:
+                logger.exception('Terminal output observer failed for {}', self.id)
 
     async def resize(self, rows: int, cols: int):
         """Update the headless mirror size and refresh snapshot metadata."""

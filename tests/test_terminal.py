@@ -154,6 +154,20 @@ class FakeWorkerProcess:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
+async def test_append_output_notifies_output_observer():
+    observed = []
+    session = TerminalSession(
+        pty_process=DummyPtyProcess(),
+        on_output=lambda data, update_id: observed.append((data, update_id)),
+    )
+
+    await session.append_output('hello')
+    await session.append_output(' world')
+
+    assert observed == [('hello', 1), (' world', 2)]
+
+
 @pytest.fixture
 async def manager():
     m = PTYManager()
