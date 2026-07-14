@@ -94,6 +94,7 @@ class TerminalSession:
         terminal_theme: dict[str, str] | None = None,
         state_worker: HeadlessXtermWorker | None = None,
         scrollback: int = DEFAULT_SCROLLBACK,
+        compaction_enabled: bool = True,
     ) -> 'TerminalSession':
         """Create and start monitoring a new terminal session.
 
@@ -105,8 +106,11 @@ class TerminalSession:
                 shell is launched first.
             env: Extra environment variables to inject into the spawned shell.
             on_complete: Callback invoked once when the session terminates.
-            state_worker: Worker used to mirror output into xterm-headless.
+            state_worker: Worker used to mirror output into xterm-headless when
+                compaction is enabled. If omitted, the session creates and owns one.
             scrollback: Headless xterm scrollback setting.
+            compaction_enabled: Whether to maintain compacted xterm snapshots. When
+                false, no worker is created unless one is explicitly supplied.
         """
         if shell and command:
             raise ValueError('Cannot specify both shell and command.')
@@ -122,7 +126,9 @@ class TerminalSession:
             pty_process = await VirtualTerm.spawn(
                 dimensions=dimensions, cwd=cwd, shell=shell, env=env
             )
-        worker = state_worker or HeadlessXtermWorker()
+        worker = state_worker
+        if compaction_enabled and worker is None:
+            worker = HeadlessXtermWorker()
         rows, cols = dimensions
         session = cls(
             pty_process=pty_process,
@@ -131,24 +137,27 @@ class TerminalSession:
             on_snapshot=on_snapshot,
             cwd=cwd,
             state_worker=worker,
-            _owns_worker=state_worker is None,
+            _owns_worker=worker is not None and state_worker is None,
         )
-        try:
-            session.compactor = await TerminalStateCompactor.create(
-                session.id,
-                rows=rows,
-                cols=cols,
-                worker=worker,
-                scrollback=scrollback,
-                theme=terminal_theme,
-                on_snapshot=on_snapshot,
-            )
-        except Exception:
-            with suppress(TerminalDeadError):
-                await pty_process.terminate()
-            if session._owns_worker:
-                await worker.shutdown()
-            raise
+        if compaction_enabled:
+            try:
+                session.compactor = await TerminalStateCompactor.create(
+                    session.id,
+                    rows=rows,
+                    cols=cols,
+                    worker=worker,
+                    scrollback=scrollback,
+                    theme=terminal_theme,
+                    on_snapshot=on_snapshot,
+                )
+            except Exception:
+                with suppress(TerminalDeadError):
+                    await pty_process.terminate()
+                if session._owns_worker:
+                    await worker.shutdown()
+                raise
+        else:
+            session._compactor_disposed = True
         session.monitor_command_results_task = asyncio.create_task(
             session._monitor_command_results_task_impl()
         )

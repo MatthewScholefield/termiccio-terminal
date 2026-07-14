@@ -20,7 +20,7 @@ class PTYManager:
 
     def __init__(self, state_worker: HeadlessXtermWorker | None = None):
         self.sessions: Dict[str, TerminalSession] = {}
-        self.state_worker = state_worker or HeadlessXtermWorker()
+        self.state_worker = state_worker
 
     async def create_session(
         self,
@@ -34,8 +34,15 @@ class PTYManager:
         on_output: Callable[[str, int], None] | None = None,
         on_snapshot: Callable[[TerminalSnapshot], None] | None = None,
         terminal_theme: dict[str, str] | None = None,
+        compaction_enabled: bool = True,
     ) -> str:
-        """Spawn a new session and return its id."""
+        """Spawn a new session and return its id.
+
+        A shared state worker is created only when a compaction-enabled session
+        needs one; an explicitly supplied worker remains manager-owned.
+        """
+        if compaction_enabled and self.state_worker is None:
+            self.state_worker = HeadlessXtermWorker()
 
         def on_session_complete():
             self.sessions.pop(session.id, None)
@@ -53,6 +60,7 @@ class PTYManager:
             on_snapshot=on_snapshot,
             terminal_theme=terminal_theme,
             state_worker=self.state_worker,
+            compaction_enabled=compaction_enabled,
         )
         self.sessions[session.id] = session
         return session.id
@@ -69,7 +77,8 @@ class PTYManager:
         for session in list(self.sessions.values()):
             await session.shutdown()
         self.sessions.clear()
-        await self.state_worker.shutdown()
+        if self.state_worker:
+            await self.state_worker.shutdown()
         logger.info('PTY manager shutdown complete')
 
     async def write_input(self, session_id: str, data: str):

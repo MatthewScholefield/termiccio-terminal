@@ -7,6 +7,7 @@ These tests spawn real PTY processes, so they require a POSIX system with
 import asyncio
 import json
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from fastapi import FastAPI, WebSocketDisconnect
@@ -240,6 +241,55 @@ async def test_create_and_write(manager):
 
     output = ''.join(session.output_buffer)
     assert 'hello_world' in output
+
+
+@pytest.mark.asyncio
+async def test_compaction_disabled_without_worker_does_not_create_worker(monkeypatch):
+    worker_constructor = Mock()
+    monkeypatch.setattr(
+        'termiccio_terminal.session.HeadlessXtermWorker', worker_constructor
+    )
+
+    session = await TerminalSession.create(
+        command=['/bin/sh', '-c', 'exit 0'],
+        compaction_enabled=False,
+    )
+    try:
+        assert session.compactor is None
+        assert session.state_worker is None
+        assert session._owns_worker is False
+        worker_constructor.assert_not_called()
+
+        await asyncio.wait_for(session.session_dead_event.wait(), timeout=2)
+        await asyncio.wait_for(session.monitor_task, timeout=2)
+    finally:
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_compaction_disabled_does_not_create_compactor():
+    worker = FakeStateWorker()
+    manager = PTYManager(state_worker=worker)
+    try:
+        session_id = await manager.create_session(
+            24,
+            80,
+            command=['/bin/sh', '-c', 'exit 0'],
+            compaction_enabled=False,
+        )
+        session = manager.get_session(session_id)
+
+        assert session.compactor is None
+        assert session.state_worker is worker
+        assert session._owns_worker is False
+        assert worker.created == []
+
+        await asyncio.wait_for(session.session_dead_event.wait(), timeout=2)
+        await asyncio.wait_for(session.monitor_task, timeout=2)
+    finally:
+        await manager.shutdown()
+
+    assert worker.shutdown_count == 1
 
 
 @pytest.mark.asyncio
