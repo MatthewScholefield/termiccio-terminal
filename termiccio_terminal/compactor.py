@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Callable
+
+from loguru import logger
 
 from .xterm_worker import HeadlessXtermWorker
 
@@ -27,6 +30,7 @@ class TerminalSnapshot:
     rows: int
     cols: int
     scrollback: int
+    background: str | None = None
 
 
 class TerminalStateCompactor:
@@ -42,6 +46,8 @@ class TerminalStateCompactor:
         scrollback: int = DEFAULT_SCROLLBACK,
         byte_threshold: int = DEFAULT_SNAPSHOT_BYTE_THRESHOLD,
         interval_seconds: float = DEFAULT_SNAPSHOT_INTERVAL_SECONDS,
+        theme: dict[str, str] | None = None,
+        on_snapshot: Callable[[TerminalSnapshot], None] | None = None,
     ):
         self.terminal_id = terminal_id
         self.rows = rows
@@ -50,6 +56,8 @@ class TerminalStateCompactor:
         self.worker = worker
         self.byte_threshold = byte_threshold
         self.interval_seconds = interval_seconds
+        self.theme = theme
+        self.on_snapshot = on_snapshot
         self.snapshot: TerminalSnapshot | None = None
         self._bytes_since_snapshot = 0
         self._last_snapshot_at = 0.0
@@ -65,6 +73,8 @@ class TerminalStateCompactor:
         scrollback: int = DEFAULT_SCROLLBACK,
         byte_threshold: int = DEFAULT_SNAPSHOT_BYTE_THRESHOLD,
         interval_seconds: float = DEFAULT_SNAPSHOT_INTERVAL_SECONDS,
+        theme: dict[str, str] | None = None,
+        on_snapshot: Callable[[TerminalSnapshot], None] | None = None,
     ) -> 'TerminalStateCompactor':
         compactor = cls(
             terminal_id,
@@ -74,8 +84,16 @@ class TerminalStateCompactor:
             scrollback=scrollback,
             byte_threshold=byte_threshold,
             interval_seconds=interval_seconds,
+            theme=theme,
+            on_snapshot=on_snapshot,
         )
-        await worker.create(terminal_id, rows=rows, cols=cols, scrollback=scrollback)
+        await worker.create(
+            terminal_id,
+            rows=rows,
+            cols=cols,
+            scrollback=scrollback,
+            theme=theme,
+        )
         return compactor
 
     async def write(self, data: str, update_id: int) -> TerminalSnapshot | None:
@@ -104,9 +122,17 @@ class TerminalStateCompactor:
             rows=self.rows,
             cols=self.cols,
             scrollback=self.scrollback,
+            background=worker_snapshot.background,
         )
         self._bytes_since_snapshot = 0
         self._last_snapshot_at = time.monotonic()
+        if self.on_snapshot:
+            try:
+                self.on_snapshot(self.snapshot)
+            except Exception:
+                logger.exception(
+                    'Terminal snapshot observer failed for {}', self.terminal_id
+                )
         return self.snapshot
 
     async def dispose(self) -> None:

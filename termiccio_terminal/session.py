@@ -45,6 +45,7 @@ class TerminalSession:
     active_connections: int = 0
     on_complete: Callable[[], None] | None = None
     on_output: Callable[[str, int], None] | None = None
+    on_snapshot: Callable[[TerminalSnapshot], None] | None = None
     cwd: Path | None = None
     compactor: TerminalStateCompactor | None = None
     state_worker: HeadlessXtermWorker | None = None
@@ -89,6 +90,8 @@ class TerminalSession:
         env: dict[str, str] | None = None,
         on_complete: Callable[[], None] | None = None,
         on_output: Callable[[str, int], None] | None = None,
+        on_snapshot: Callable[[TerminalSnapshot], None] | None = None,
+        terminal_theme: dict[str, str] | None = None,
         state_worker: HeadlessXtermWorker | None = None,
         scrollback: int = DEFAULT_SCROLLBACK,
     ) -> 'TerminalSession':
@@ -125,6 +128,7 @@ class TerminalSession:
             pty_process=pty_process,
             on_complete=on_complete,
             on_output=on_output,
+            on_snapshot=on_snapshot,
             cwd=cwd,
             state_worker=worker,
             _owns_worker=state_worker is None,
@@ -136,6 +140,8 @@ class TerminalSession:
                 cols=cols,
                 worker=worker,
                 scrollback=scrollback,
+                theme=terminal_theme,
+                on_snapshot=on_snapshot,
             )
         except Exception:
             with suppress(TerminalDeadError):

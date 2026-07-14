@@ -18,6 +18,7 @@ from loguru import logger
 @dataclass(frozen=True)
 class WorkerSnapshot:
     data: str
+    background: str | None
 
 
 class HeadlessXtermWorkerExited(RuntimeError):
@@ -58,7 +59,13 @@ class HeadlessXtermWorker:
         self._stdout_reader_error: str | None = None
 
     async def create(
-        self, terminal_id: str, *, rows: int, cols: int, scrollback: int
+        self,
+        terminal_id: str,
+        *,
+        rows: int,
+        cols: int,
+        scrollback: int,
+        theme: dict[str, str] | None = None,
     ) -> None:
         await self._command(
             {
@@ -67,6 +74,7 @@ class HeadlessXtermWorker:
                 'rows': rows,
                 'cols': cols,
                 'scrollback': scrollback,
+                'theme': theme,
             }
         )
 
@@ -88,7 +96,10 @@ class HeadlessXtermWorker:
         data = response.get('data')
         if not isinstance(data, str):
             raise RuntimeError('Headless xterm worker returned an invalid snapshot')
-        return WorkerSnapshot(data=data)
+        background = response.get('background')
+        if background is not None and not isinstance(background, (str, int)):
+            raise RuntimeError('Headless xterm worker returned an invalid background')
+        return WorkerSnapshot(data=data, background=background)
 
     async def dispose(self, terminal_id: str) -> None:
         await self._command({'type': 'dispose', 'terminal_id': terminal_id})

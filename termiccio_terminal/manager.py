@@ -4,6 +4,7 @@ from typing import Callable, Dict, Sequence, Tuple
 from loguru import logger
 
 from virtual_term import TerminalDeadError
+from .compactor import TerminalSnapshot
 from .session import TerminalSession
 from .xterm_worker import HeadlessXtermWorker
 
@@ -31,6 +32,8 @@ class PTYManager:
         env: dict[str, str] | None = None,
         on_complete: Callable[[str], None] | None = None,
         on_output: Callable[[str, int], None] | None = None,
+        on_snapshot: Callable[[TerminalSnapshot], None] | None = None,
+        terminal_theme: dict[str, str] | None = None,
     ) -> str:
         """Spawn a new session and return its id."""
 
@@ -47,6 +50,8 @@ class PTYManager:
             env=env,
             on_complete=on_session_complete,
             on_output=on_output,
+            on_snapshot=on_snapshot,
+            terminal_theme=terminal_theme,
             state_worker=self.state_worker,
         )
         self.sessions[session.id] = session

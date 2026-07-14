@@ -40,8 +40,8 @@ class FakeStateWorker:
         self.snapshot_count = 0
         self.shutdown_count = 0
 
-    async def create(self, terminal_id, *, rows, cols, scrollback):
-        self.created.append((terminal_id, rows, cols, scrollback))
+    async def create(self, terminal_id, *, rows, cols, scrollback, theme=None):
+        self.created.append((terminal_id, rows, cols, scrollback, theme))
         self.buffers[terminal_id] = ''
 
     async def write(self, terminal_id, data):
@@ -52,7 +52,7 @@ class FakeStateWorker:
 
     async def snapshot(self, terminal_id):
         self.snapshot_count += 1
-        return WorkerSnapshot(data=self.buffers[terminal_id])
+        return WorkerSnapshot(data=self.buffers[terminal_id], background=None)
 
     async def dispose(self, terminal_id):
         self.disposed.append(terminal_id)
@@ -72,7 +72,7 @@ class SecondSnapshotFailingWorker(FakeStateWorker):
         self.snapshot_count += 1
         if self.snapshot_count > 1:
             raise RuntimeError('second snapshot exploded')
-        return WorkerSnapshot(data=self.buffers[terminal_id])
+        return WorkerSnapshot(data=self.buffers[terminal_id], background=None)
 
 
 class DummyPtyProcess:
@@ -310,6 +310,71 @@ async def test_headless_worker_can_serialize_snapshot():
         await worker.shutdown()
 
     assert 'hello from xterm' in snapshot.data
+    assert snapshot.background is None
+
+
+@pytest.mark.asyncio
+async def test_headless_worker_detects_dominant_explicit_bottom_background():
+    worker = HeadlessXtermWorker()
+    try:
+        await worker.create('background-snapshot', rows=4, cols=20, scrollback=1000)
+        await worker.write('background-snapshot', '\x1b[48;2;20;40;60m' + (' ' * 80))
+        snapshot = await worker.snapshot('background-snapshot')
+    finally:
+        await worker.shutdown()
+
+    assert snapshot.background == '#14283c'
+
+
+@pytest.mark.asyncio
+async def test_compaction_notifies_snapshot_observer():
+    worker = FakeStateWorker()
+    worker_background = '#14283c'
+
+    async def snapshot(terminal_id):
+        worker.snapshot_count += 1
+        return WorkerSnapshot(
+            data=worker.buffers[terminal_id], background=worker_background
+        )
+
+    worker.snapshot = snapshot
+    observed = []
+    compactor = await TerminalStateCompactor.create(
+        'observed-compaction',
+        rows=4,
+        cols=20,
+        worker=worker,
+        byte_threshold=1,
+        interval_seconds=0,
+        on_snapshot=observed.append,
+    )
+
+    snapshot_result = await compactor.write('x', 1)
+
+    assert observed == [snapshot_result]
+    assert snapshot_result.background == '#14283c'
+
+
+@pytest.mark.asyncio
+async def test_snapshot_observer_failure_does_not_disable_compaction():
+    worker = FakeStateWorker()
+
+    def fail(_snapshot):
+        raise RuntimeError('observer exploded')
+
+    compactor = await TerminalStateCompactor.create(
+        'failing-observer',
+        rows=4,
+        cols=20,
+        worker=worker,
+        byte_threshold=1,
+        interval_seconds=0,
+        on_snapshot=fail,
+    )
+
+    assert await compactor.write('first', 1) is not None
+    assert await compactor.write('second', 2) is not None
+    assert worker.snapshot_count == 2
 
 
 @pytest.mark.asyncio
