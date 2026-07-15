@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+import asyncio
 from typing import Callable
 
 from loguru import logger
@@ -87,14 +88,17 @@ class TerminalStateCompactor:
             theme=theme,
             on_snapshot=on_snapshot,
         )
-        await worker.create(
-            terminal_id,
-            rows=rows,
-            cols=cols,
-            scrollback=scrollback,
-            theme=theme,
-        )
+        await compactor.initialize()
         return compactor
+
+    async def initialize(self) -> None:
+        await self.worker.create(
+            self.terminal_id,
+            rows=self.rows,
+            cols=self.cols,
+            scrollback=self.scrollback,
+            theme=self.theme,
+        )
 
     async def write(self, data: str, update_id: int) -> TerminalSnapshot | None:
         await self.worker.write(self.terminal_id, data)
@@ -127,13 +131,16 @@ class TerminalStateCompactor:
         self._bytes_since_snapshot = 0
         self._last_snapshot_at = time.monotonic()
         if self.on_snapshot:
-            try:
-                self.on_snapshot(self.snapshot)
-            except Exception:
-                logger.exception(
-                    'Terminal snapshot observer failed for {}', self.terminal_id
-                )
+            asyncio.create_task(asyncio.to_thread(self._notify_snapshot, self.snapshot))
         return self.snapshot
+
+    def _notify_snapshot(self, snapshot: TerminalSnapshot) -> None:
+        try:
+            self.on_snapshot(snapshot)
+        except Exception:
+            logger.exception(
+                'Terminal snapshot observer failed for {}', self.terminal_id
+            )
 
     async def dispose(self) -> None:
         await self.worker.dispose(self.terminal_id)

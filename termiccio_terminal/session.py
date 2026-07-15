@@ -55,6 +55,14 @@ class TerminalSession:
     _compactor_disposed: bool = False
     _compaction_failed: bool = False
     _shutdown_requested: bool = False
+    _compaction_queue: asyncio.Queue[tuple] = field(
+        default_factory=lambda: asyncio.Queue(maxsize=1024)
+    )
+    _compaction_task: asyncio.Task | None = None
+    _observer_queue: asyncio.Queue[tuple[str, int]] = field(
+        default_factory=asyncio.Queue
+    )
+    _observer_task: asyncio.Task | None = None
 
     @property
     def id(self) -> str:
@@ -140,22 +148,16 @@ class TerminalSession:
             _owns_worker=worker is not None and state_worker is None,
         )
         if compaction_enabled:
-            try:
-                session.compactor = await TerminalStateCompactor.create(
-                    session.id,
-                    rows=rows,
-                    cols=cols,
-                    worker=worker,
-                    scrollback=scrollback,
-                    theme=terminal_theme,
-                    on_snapshot=on_snapshot,
-                )
-            except Exception:
-                with suppress(TerminalDeadError):
-                    await pty_process.terminate()
-                if session._owns_worker:
-                    await worker.shutdown()
-                raise
+            session.compactor = TerminalStateCompactor(
+                session.id,
+                rows=rows,
+                cols=cols,
+                worker=worker,
+                scrollback=scrollback,
+                theme=terminal_theme,
+                on_snapshot=on_snapshot,
+            )
+            session._ensure_compaction_task()
         else:
             session._compactor_disposed = True
         session.monitor_command_results_task = asyncio.create_task(
@@ -165,51 +167,38 @@ class TerminalSession:
         return session
 
     async def append_output(self, data: str):
-        """Append one decoded PTY chunk, mirror it, and compact when eligible."""
+        """Append one decoded PTY chunk and enqueue best-effort compaction."""
         async with self._output_lock:
             self.next_update_id += 1
             chunk = TerminalOutputChunk(data=data, update_id=self.next_update_id)
             self.output_chunks.append(chunk)
             self.replay_chunks.append(chunk)
             if self.compactor and not self._compaction_failed:
-                try:
-                    snapshot = await self.compactor.write(data, chunk.update_id)
-                except Exception:
-                    self._compaction_failed = True
-                    logger.exception(
-                        'Terminal state compaction failed for {}; future snapshots '
-                        'disabled and replay output retained',
-                        self.id,
-                    )
-                else:
-                    if snapshot:
-                        self._apply_snapshot_compaction(snapshot)
+                self._ensure_compaction_task()
+                self._enqueue_compaction(('write', data, chunk.update_id))
         self.new_content_event.set()
         if self.on_output:
-            try:
-                self.on_output(data, chunk.update_id)
-            except Exception:
-                logger.exception('Terminal output observer failed for {}', self.id)
+            self._observer_queue.put_nowait((data, chunk.update_id))
+            if self._observer_task is None:
+                self._observer_task = asyncio.create_task(self._run_output_observer())
+
+    async def _run_output_observer(self) -> None:
+        while True:
+            data, update_id = await self._observer_queue.get()
+            await asyncio.to_thread(self._notify_output, data, update_id)
+
+    def _notify_output(self, data: str, update_id: int) -> None:
+        try:
+            self.on_output(data, update_id)
+        except Exception:
+            logger.exception('Terminal output observer failed for {}', self.id)
 
     async def resize(self, rows: int, cols: int):
-        """Update the headless mirror size and refresh snapshot metadata."""
-        async with self._output_lock:
-            if not self.compactor or self._compaction_failed:
-                return
-            try:
-                snapshot = await self.compactor.resize(
-                    rows=rows, cols=cols, update_id=self.next_update_id
-                )
-            except Exception:
-                self._compaction_failed = True
-                logger.exception(
-                    'Terminal state resize failed for {}; future snapshots disabled '
-                    'and replay output retained',
-                    self.id,
-                )
-            else:
-                if snapshot:
-                    self._apply_snapshot_compaction(snapshot)
+        """Enqueue a mirror resize after the real PTY has already resized."""
+        if not self.compactor or self._compaction_failed:
+            return
+        self._ensure_compaction_task()
+        self._enqueue_compaction(('resize', rows, cols, self.next_update_id))
 
     async def reconnect_payload(
         self, requested_update_id: int
@@ -261,17 +250,69 @@ class TerminalSession:
                 with suppress(asyncio.CancelledError):
                     await self.monitor_command_results_task
             await self._dispose_compactor()
+            if self._observer_task:
+                self._observer_task.cancel()
             self._mark_complete('shutdown requested')
 
     async def _dispose_compactor(self):
         if self._compactor_disposed:
             return
         self._compactor_disposed = True
-        if self.compactor:
+        if self._compaction_task:
+            self._compaction_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._compaction_task
+        elif self.compactor:
             with suppress(Exception):
                 await self.compactor.dispose()
         if self._owns_worker and self.state_worker:
             await self.state_worker.shutdown()
+
+    def _enqueue_compaction(self, operation: tuple) -> None:
+        try:
+            self._compaction_queue.put_nowait(operation)
+        except asyncio.QueueFull:
+            self._compaction_failed = True
+            if self._compaction_task:
+                self._compaction_task.cancel()
+            logger.warning(
+                'Terminal state compaction backlog full for {}; snapshots disabled',
+                self.id,
+            )
+
+    def _ensure_compaction_task(self):
+        if self._compaction_task is None:
+            self._compaction_task = asyncio.create_task(self._run_compaction())
+
+    async def _run_compaction(self):
+        assert self.compactor
+        try:
+            await self.compactor.initialize()
+            while True:
+                operation = await self._compaction_queue.get()
+                if operation[0] == 'stop':
+                    break
+                if operation[0] == 'write':
+                    snapshot = await self.compactor.write(operation[1], operation[2])
+                else:
+                    snapshot = await self.compactor.resize(
+                        rows=operation[1],
+                        cols=operation[2],
+                        update_id=operation[3],
+                    )
+                if snapshot:
+                    async with self._output_lock:
+                        self._apply_snapshot_compaction(snapshot)
+        except Exception:
+            self._compaction_failed = True
+            logger.exception(
+                'Terminal state compaction failed for {}; future snapshots disabled '
+                'and replay output retained',
+                self.id,
+            )
+        finally:
+            with suppress(Exception):
+                await self.compactor.dispose()
 
     def _discard_chunks_through(self, update_id: int):
         self.base_update_id = max(self.base_update_id, update_id)

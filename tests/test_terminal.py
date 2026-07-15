@@ -32,6 +32,12 @@ from termiccio_terminal.xterm_worker import (
 )
 
 
+async def wait_until(predicate, timeout=1):
+    async with asyncio.timeout(timeout):
+        while not predicate():
+            await asyncio.sleep(0)
+
+
 class FakeStateWorker:
     def __init__(self):
         self.buffers = {}
@@ -62,6 +68,43 @@ class FakeStateWorker:
         self.shutdown_count += 1
 
 
+class BlockingOutputObserver:
+    def __init__(self, loop):
+        self.loop = loop
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    def __call__(self, _data, _update_id):
+        self.loop.call_soon_threadsafe(self.started.set)
+        asyncio.run_coroutine_threadsafe(self.release.wait(), self.loop).result()
+
+
+class GatedCreateWorker(FakeStateWorker):
+    def __init__(self):
+        super().__init__()
+        self.create_started = asyncio.Event()
+        self.release_create = asyncio.Event()
+
+    async def create(self, terminal_id, *, rows, cols, scrollback, theme=None):
+        self.create_started.set()
+        await self.release_create.wait()
+        await super().create(
+            terminal_id, rows=rows, cols=cols, scrollback=scrollback, theme=theme
+        )
+
+
+class GatedStateWorker(FakeStateWorker):
+    def __init__(self):
+        super().__init__()
+        self.write_started = asyncio.Event()
+        self.release_write = asyncio.Event()
+
+    async def write(self, terminal_id, data):
+        self.write_started.set()
+        await self.release_write.wait()
+        await super().write(terminal_id, data)
+
+
 class SnapshotFailingWorker(FakeStateWorker):
     async def snapshot(self, terminal_id):
         self.snapshot_count += 1
@@ -84,6 +127,18 @@ class DummyPtyProcess:
 
     async def terminate(self):
         self.terminated = True
+
+    async def read_output_stream(self):
+        while not self.terminated:
+            await asyncio.sleep(0)
+        if False:
+            yield b''
+
+    async def read_command_result_stream(self):
+        while not self.terminated:
+            await asyncio.sleep(0)
+        if False:
+            yield 0
 
 
 class FakeReadablePipe:
@@ -156,6 +211,21 @@ class FakeWorkerProcess:
 
 
 @pytest.mark.asyncio
+async def test_append_output_does_not_wait_for_output_observer():
+    observer = BlockingOutputObserver(asyncio.get_running_loop())
+    session = TerminalSession(
+        pty_process=DummyPtyProcess(),
+        on_output=observer,
+    )
+
+    await asyncio.wait_for(session.append_output('hello'), timeout=0.1)
+    await asyncio.wait_for(observer.started.wait(), timeout=0.1)
+
+    observer.release.set()
+    await session.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_append_output_notifies_output_observer():
     observed = []
     session = TerminalSession(
@@ -165,8 +235,12 @@ async def test_append_output_notifies_output_observer():
 
     await session.append_output('hello')
     await session.append_output(' world')
+    await wait_until(lambda: len(observed) == 2)
 
-    assert observed == [('hello', 1), (' world', 2)]
+    assert sorted(observed, key=lambda item: item[1]) == [
+        ('hello', 1),
+        (' world', 2),
+    ]
 
 
 @pytest.fixture
@@ -241,6 +315,28 @@ async def test_create_and_write(manager):
 
     output = ''.join(session.output_buffer)
     assert 'hello_world' in output
+
+
+@pytest.mark.asyncio
+async def test_session_creation_does_not_wait_for_compaction_worker(monkeypatch):
+    worker = GatedCreateWorker()
+
+    async def spawn_command(*_args, **_kwargs):
+        return DummyPtyProcess()
+
+    monkeypatch.setattr(
+        'termiccio_terminal.session.VirtualTerm.spawn_command', spawn_command
+    )
+
+    session = await asyncio.wait_for(
+        TerminalSession.create(command=['ignored'], state_worker=worker), timeout=0.1
+    )
+    await asyncio.wait_for(worker.create_started.wait(), timeout=0.1)
+
+    worker.release_create.set()
+    session.monitor_task.cancel()
+    session.monitor_command_results_task.cancel()
+    await session.shutdown()
 
 
 @pytest.mark.asyncio
@@ -377,6 +473,32 @@ async def test_headless_worker_detects_dominant_explicit_bottom_background():
 
 
 @pytest.mark.asyncio
+async def test_snapshot_observer_runs_outside_event_loop():
+    worker = FakeStateWorker()
+    callback_started = asyncio.Event()
+    callback_release = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def observe(_snapshot):
+        loop.call_soon_threadsafe(callback_started.set)
+        asyncio.run_coroutine_threadsafe(callback_release.wait(), loop).result()
+
+    compactor = await TerminalStateCompactor.create(
+        'non-blocking-observer',
+        rows=4,
+        cols=20,
+        worker=worker,
+        byte_threshold=1,
+        interval_seconds=0,
+        on_snapshot=observe,
+    )
+
+    await asyncio.wait_for(compactor.write('x', 1), timeout=0.1)
+    await asyncio.wait_for(callback_started.wait(), timeout=0.1)
+    callback_release.set()
+
+
+@pytest.mark.asyncio
 async def test_compaction_notifies_snapshot_observer():
     worker = FakeStateWorker()
     worker_background = '#14283c'
@@ -400,6 +522,7 @@ async def test_compaction_notifies_snapshot_observer():
     )
 
     snapshot_result = await compactor.write('x', 1)
+    await wait_until(lambda: bool(observed))
 
     assert observed == [snapshot_result]
     assert snapshot_result.background == '#14283c'
@@ -424,6 +547,7 @@ async def test_snapshot_observer_failure_does_not_disable_compaction():
 
     assert await compactor.write('first', 1) is not None
     assert await compactor.write('second', 2) is not None
+    await asyncio.sleep(0)
     assert worker.snapshot_count == 2
 
 
@@ -528,6 +652,29 @@ async def test_headless_worker_unexpected_exit_keeps_diagnostics(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_append_output_does_not_wait_for_compaction_worker():
+    worker = GatedStateWorker()
+    compactor = await TerminalStateCompactor.create(
+        'non-blocking-output',
+        rows=24,
+        cols=80,
+        worker=worker,
+        byte_threshold=999,
+    )
+    session = TerminalSession(pty_process=DummyPtyProcess(), compactor=compactor)
+
+    await asyncio.wait_for(session.append_output('interactive'), timeout=0.1)
+    snapshot, chunks = await session.reconnect_payload(0)
+
+    assert snapshot is None
+    assert [chunk.data for chunk in chunks] == ['interactive']
+    await asyncio.wait_for(worker.write_started.wait(), timeout=0.1)
+
+    worker.release_write.set()
+    await session.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_reconnect_before_compaction_receives_retained_output_only():
     worker = FakeStateWorker()
     compactor = await TerminalStateCompactor.create(
@@ -561,6 +708,7 @@ async def test_reconnect_after_compaction_receives_snapshot_plus_new_tail():
     session = TerminalSession(pty_process=DummyPtyProcess(), compactor=compactor)
 
     await session.append_output('snapshot-base')
+    await wait_until(lambda: compactor.snapshot is not None)
     compactor.byte_threshold = 999
     await session.append_output('tail')
 
@@ -587,6 +735,7 @@ async def test_compactor_failure_keeps_session_live_and_retains_output():
 
     await session.append_output('still-live')
     await session.append_output('still-retained')
+    await wait_until(lambda: session._compaction_failed)
 
     snapshot, chunks = await session.reconnect_payload(0)
     assert snapshot is None
@@ -610,7 +759,9 @@ async def test_compactor_failure_after_snapshot_keeps_snapshot_reconnect():
     session = TerminalSession(pty_process=DummyPtyProcess(), compactor=compactor)
 
     await session.append_output('snapshot-base')
+    await wait_until(lambda: compactor.snapshot is not None)
     await session.append_output('tail')
+    await wait_until(lambda: session._compaction_failed)
 
     snapshot, chunks = await session.reconnect_payload(0)
     assert snapshot is not None
@@ -635,6 +786,7 @@ async def test_reconnect_falls_back_to_compacted_replay_if_snapshot_missing():
     session = TerminalSession(pty_process=DummyPtyProcess(), compactor=compactor)
 
     await session.append_output('snapshot-base')
+    await wait_until(lambda: compactor.snapshot is not None)
     compactor.snapshot = None
     compactor.byte_threshold = 999
     await session.append_output('tail')
@@ -658,13 +810,28 @@ async def test_resize_updates_snapshot_metadata_and_mirror_dimensions():
     )
     session = TerminalSession(pty_process=DummyPtyProcess(), compactor=compactor)
     await session.append_output('x')
+    await wait_until(lambda: compactor.snapshot is not None)
 
     await session.resize(30, 100)
+    await wait_until(lambda: compactor.snapshot.rows == 30)
 
     assert worker.resized == [('resize-snapshot', 30, 100)]
     assert compactor.snapshot is not None
     assert compactor.snapshot.rows == 30
     assert compactor.snapshot.cols == 100
+
+
+@pytest.mark.asyncio
+async def test_shutdown_abandons_stalled_compaction():
+    worker = GatedStateWorker()
+    compactor = await TerminalStateCompactor.create(
+        'shutdown-stalled', rows=24, cols=80, worker=worker
+    )
+    session = TerminalSession(pty_process=DummyPtyProcess(), compactor=compactor)
+    await session.append_output('blocked')
+    await worker.write_started.wait()
+
+    await asyncio.wait_for(session.shutdown(), timeout=0.1)
 
 
 @pytest.mark.asyncio
@@ -832,11 +999,14 @@ def test_websocket_echo(app_with_router):
 
             # Collect messages until we see our echo
             found = False
-            for _ in range(20):
+            output = ''
+            for _ in range(40):
                 msg = ws.receive_json()
-                if msg['type'] == 'output' and 'ws_test_123' in msg.get('data', ''):
-                    found = True
-                    break
+                if msg['type'] == 'output':
+                    output += msg.get('data', '')
+                    if 'ws_test_123' in output:
+                        found = True
+                        break
             assert found, 'Did not receive echoed output'
 
 
